@@ -13,3 +13,6 @@ dependencies = [
 simconnect = [
     "simconnect>=0.4.26",
 ]
+pysimconnect = [
+    "pysimconnect>=0.2.6",
+]

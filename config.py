@@ -102,6 +102,9 @@ WINDOW_HEIGHT = DISPLAY_HEIGHT
 WS_HOST = "10.0.0.158"
 WS_PORT = 8765
 
+# Path to SimConnect.dll — override if your SDK is installed elsewhere
+SC_DLL_PATH = "C:/MSFS 2024 SDK/SimConnect SDK/lib/SimConnect.dll"
+
 # Tile layout
 TILE_PADDING = 6  # px inside each tile
 FONT_LABEL_SIZE = 14

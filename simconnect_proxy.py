@@ -7,13 +7,11 @@ WebSocket in the same JSON format as mock_server.py.
 Run this on the Windows PC running MSFS. The Pi (or any display.py client)
 connects to ws://<this-pc-ip>:8765 instead of localhost.
 
-Requirements (Windows only):
-    pip install SimConnect
-    -- or inside this project's venv --
-    uv add SimConnect --optional simconnect
+Requirements:
+    uv run --extra pysimconnect python simconnect_proxy.py
 
 Usage:
-    python simconnect_proxy.py [--host 0.0.0.0] [--port 8765]
+    python simconnect_proxy.py [--host 0.0.0.0] [--port 8765] [--dll PATH]
 """
 
 import argparse
@@ -21,87 +19,78 @@ import asyncio
 import json
 import signal
 import threading
-import time
-
-try:
-    from SimConnect import AircraftRequests, SimConnect
-    SIMCONNECT_AVAILABLE = True
-except ImportError:
-    SIMCONNECT_AVAILABLE = False
 
 from websockets.asyncio.server import serve
 
-from config import SIMVARS, WS_PORT
+from config import SIMVARS, WS_PORT, SC_DLL_PATH
 
 # ---------------------------------------------------------------------------
 # SimConnect → our SimVar mapping
 #
-# Format:  "OUR_KEY": ("SimConnect Variable Name", transform_fn)
+# Format: "OUR_KEY": ("SimConnect Variable Name", "units", transform_fn)
 #
-# transform_fn receives the raw value from SimConnect (may be None on error)
-# and should return a bool or numeric value matching config.py expectations.
+# transform_fn receives the value already converted to the requested units
+# (always float64 for numeric/bool types) and returns a bool or number.
 #
 # Unmapped keys (e.g. MASTER_WARNING) stay at their default (False / 0).
-# You can add aircraft-specific L:var reads via a WASM bridge separately.
 # ---------------------------------------------------------------------------
 
 def _b(v):
-    """Raw value → bool."""
-    return bool(int(v)) if v is not None else False
+    """float → bool"""
+    return bool(v)
 
-def _f(v, default=0.0):
-    """Raw value → float."""
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return default
 
-SIMVAR_MAP: dict[str, tuple[str, callable]] = {
+SIMVAR_MAP: dict[str, tuple[str, str | None, callable]] = {
     # --- Lights ---
-    "LIGHT_LANDING_LEFT":  ("LIGHT LANDING",                      _b),
-    "LIGHT_LANDING_RIGHT": ("LIGHT LANDING",                      _b),
-    "LIGHT_STROBE":        ("LIGHT STROBE",                       _b),
-    "LIGHT_NAV":           ("LIGHT NAV",                          _b),
-    "LIGHT_BEACON":        ("LIGHT BEACON",                       _b),
-    "LIGHT_TAXI":          ("LIGHT TAXI",                         _b),
+    "LIGHT_LANDING_LEFT":    ("LIGHT LANDING",               "Bool",                   _b),
+    "LIGHT_LANDING_RIGHT":   ("LIGHT LANDING",               "Bool",                   _b),
+    "LIGHT_STROBE":          ("LIGHT STROBE",                "Bool",                   _b),
+    "LIGHT_NAV":             ("LIGHT NAV",                   "Bool",                   _b),
+    "LIGHT_BEACON":          ("LIGHT BEACON",                "Bool",                   _b),
+    "LIGHT_TAXI":            ("LIGHT TAXI",                  "Bool",                   _b),
 
     # --- Engines ---
-    "ENGINE_1_RUNNING":    ("GENERAL ENG COMBUSTION:1",           _b),
-    "ENGINE_2_RUNNING":    ("GENERAL ENG COMBUSTION:2",           _b),
+    "ENGINE_1_RUNNING":      ("GENERAL ENG COMBUSTION:1",    "Bool",                   _b),
+    "ENGINE_2_RUNNING":      ("GENERAL ENG COMBUSTION:2",    "Bool",                   _b),
 
     # --- Systems ---
-    # Gear: true when all gear > 95 % extended
-    "GEAR_DEPLOYED":       ("GEAR TOTAL PCT EXTENDED",            lambda v: _f(v) > 0.95),
-    # Anti-ice: structural de-ice switch (check your aircraft — may differ)
-    "ANTI_ICE_ON":         ("STRUCTURAL DEICE SWITCH",            _b),
-    "PITOT_HEAT":          ("PITOT HEAT",                         _b),
-    "PARKING_BRAKE":       ("BRAKE PARKING INDICATOR",            _b),
+    "GEAR_DEPLOYED":         ("GEAR TOTAL PCT EXTENDED",     "Percent Over 100",       lambda v: float(v) > 0.95),
+    "ANTI_ICE_ON":           ("STRUCTURAL DEICE SWITCH",     "Bool",                   _b),
+    "PITOT_HEAT":            ("PITOT HEAT",                  "Bool",                   _b),
+    "PARKING_BRAKE":         ("BRAKE PARKING INDICATOR",     "Bool",                   _b),
 
     # --- Annunciators ---
-    # MASTER_WARNING / MASTER_CAUTION have no universal SimConnect variable.
-    # Most airliners expose them as L:vars via WASM. Map them here once you
+    # MASTER_WARNING / MASTER_CAUTION have no universal SimConnect variable;
+    # most airliners expose them as L:vars via WASM. Add them here once you
     # know your aircraft's specific variable names.
-    # "MASTER_WARNING":   ("L:Generic_Master_Warning_Active", _b),
-    # "MASTER_CAUTION":   ("L:Generic_Master_Caution_Active", _b),
+    # "MASTER_WARNING":      ("L:Generic_Master_Warning_Active", "Bool",               _b),
+    # "MASTER_CAUTION":      ("L:Generic_Master_Caution_Active", "Bool",               _b),
 
-    # Hydraulic: warn if pressure on system 1 drops below 1500 PSI
-    "HYD_PRESSURE_WARNING": ("HYDRAULIC PRESSURE:1",             lambda v: _f(v, 9999) < 1500),
-    "STALL_WARNING":         ("STALL WARNING",                    _b),
-    "OVERSPEED":             ("OVERSPEED WARNING",                _b),
+    "HYD_PRESSURE_WARNING":  ("HYDRAULIC PRESSURE:1",        "Pounds per square inch", lambda v: float(v) < 1500),
+    "STALL_WARNING":         ("STALL WARNING",               "Bool",                   _b),
+    "OVERSPEED":             ("OVERSPEED WARNING",           "Bool",                   _b),
     # Oil: warn below 10 PSI (adjust threshold to aircraft)
-    "OIL_PRESSURE_LOW":      ("ENG OIL PRESSURE:1",              lambda v: _f(v, 9999) < 10),
+    "OIL_PRESSURE_LOW":      ("ENG OIL PRESSURE:1",         "Pounds per square inch", lambda v: float(v) < 10),
     # Fuel: warn when tank < 10 US gallons (adjust threshold to aircraft)
-    "LOW_FUEL_L":            ("FUEL TANK LEFT MAIN QUANTITY",    lambda v: _f(v, 9999) < 10),
-    "LOW_FUEL_R":            ("FUEL TANK RIGHT MAIN QUANTITY",   lambda v: _f(v, 9999) < 10),
+    "LOW_FUEL_L":            ("FUEL TANK LEFT MAIN QUANTITY",  "Gallons",              lambda v: float(v) < 10),
+    "LOW_FUEL_R":            ("FUEL TANK RIGHT MAIN QUANTITY", "Gallons",              lambda v: float(v) < 10),
     # Door: EXIT OPEN:0 is the main cabin door on most aircraft
-    "DOOR_OPEN":             ("EXIT OPEN:0",                     lambda v: _f(v) > 0.1),
+    "DOOR_OPEN":             ("EXIT OPEN:0",                 "Percent Over 100",       lambda v: float(v) > 0.1),
 
     # --- Gauges ---
-    # Flaps handle index: integer 0–N (N depends on aircraft, typically 0–5)
-    "FLAPS_POSITION":        ("FLAPS HANDLE INDEX",              lambda v: int(_f(v))),
-    # Spoilers: 0–100 % (some aircraft use 0.0–1.0 — check and adjust)
-    "SPOILER_POSITION":      ("SPOILERS HANDLE POSITION",        lambda v: round(_f(v), 1)),
+    "FLAPS_POSITION":        ("FLAPS HANDLE INDEX",          "Number",                 lambda v: int(v)),
+    # Spoilers: 0–100 % (some aircraft use a 0.0–1.0 range — check and adjust)
+    "SPOILER_POSITION":      ("SPOILERS HANDLE POSITION",    "Percent",                lambda v: round(float(v), 1)),
 }
+
+# Build deduplicated subscription spec (some internal keys share the same SC var)
+_SC_SPEC: list[dict] = []
+_sc_vars_seen: set[str] = set()
+for _our_key, (_sc_var, _units, _) in SIMVAR_MAP.items():
+    if _sc_var not in _sc_vars_seen:
+        _sc_vars_seen.add(_sc_var)
+        _SC_SPEC.append({"name": _sc_var, "units": _units})
+
 
 # ---------------------------------------------------------------------------
 # Shared state
@@ -117,47 +106,41 @@ _connected_clients: set = set()
 # SimConnect polling thread
 # ---------------------------------------------------------------------------
 
-def _poll_simconnect(stop_event: threading.Event, debug: bool = False) -> None:
-    while not stop_event.is_set():
-        if not SIMCONNECT_AVAILABLE:
-            print("[SC] SimConnect not installed. Install with: pip install SimConnect")
-            stop_event.wait(5)
-            continue
+def _poll_simconnect(stop_event: threading.Event, dll_path: str, debug: bool = False) -> None:
+    from simconnect import SimConnect
+    from simconnect.datadef import DataDefinition
+    from simconnect.scdefs import PERIOD_SECOND
 
+    while not stop_event.is_set():
         try:
             print("[SC] Connecting to SimConnect…")
-            sm = SimConnect()
-            # _time=0: always fetch fresh data, never serve stale cache
-            aq = AircraftRequests(sm, _time=0)
-            print("[SC] Connected. Polling…")
+            # Clear cached data definitions so they get re-registered on reconnect
+            DataDefinition._instances.clear()
 
-            errors_seen: set = set()
+            with SimConnect(dll_path=dll_path) as sc:
+                dd = sc.subscribe_simdata(_SC_SPEC, period=PERIOD_SECOND)
+                print("[SC] Connected. Polling…")
 
-            while not stop_event.is_set():
-                updates: dict = {}
-                for our_key, (sc_var, transform) in SIMVAR_MAP.items():
-                    if our_key not in _sim_state:
+                while not stop_event.is_set():
+                    sc.receive(timeout_seconds=0.25)
+
+                    if not dd.simdata:
                         continue
-                    try:
-                        raw = aq.get(sc_var)
-                        if raw is not None:
-                            updates[our_key] = transform(raw)
-                        elif our_key not in errors_seen:
-                            print(f"[SC] {sc_var!r} returned None "
-                                  f"(variable name may be wrong for this aircraft)")
-                            errors_seen.add(our_key)
-                    except Exception as exc:
-                        if our_key not in errors_seen:
-                            print(f"[SC] Error reading {sc_var!r}: {exc}")
-                            errors_seen.add(our_key)
 
-                with _state_lock:
-                    _sim_state.update(updates)
+                    updates: dict = {}
+                    for our_key, (sc_var, _, transform) in SIMVAR_MAP.items():
+                        val = dd.simdata.get(sc_var)
+                        if val is not None:
+                            try:
+                                updates[our_key] = transform(val)
+                            except Exception:
+                                pass
 
-                if debug and updates:
-                    print(f"[SC] {updates}")
+                    with _state_lock:
+                        _sim_state.update(updates)
 
-                stop_event.wait(0.25)
+                    if debug and updates:
+                        print(f"[SC] {updates}")
 
         except Exception as exc:
             print(f"[SC] Error: {exc!r} — retrying in 5 s…")
@@ -196,7 +179,7 @@ async def _broadcast_loop() -> None:
         )
 
 
-async def _main(host: str, port: int, debug: bool = False) -> None:
+async def _main(host: str, port: int, dll_path: str, debug: bool = False) -> None:
     stop_future = asyncio.get_event_loop().create_future()
     loop = asyncio.get_event_loop()
 
@@ -213,7 +196,9 @@ async def _main(host: str, port: int, debug: bool = False) -> None:
 
     # Start SimConnect poll thread
     sc_stop = threading.Event()
-    sc_thread = threading.Thread(target=_poll_simconnect, args=(sc_stop, debug), daemon=True)
+    sc_thread = threading.Thread(
+        target=_poll_simconnect, args=(sc_stop, dll_path, debug), daemon=True
+    )
     sc_thread.start()
 
     async with serve(_ws_handler, host, port):
@@ -236,8 +221,10 @@ if __name__ == "__main__":
                         help="WebSocket listen address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=WS_PORT,
                         help=f"WebSocket port (default: {WS_PORT})")
+    parser.add_argument("--dll", default=SC_DLL_PATH,
+                        help=f"Path to SimConnect.dll (default: {SC_DLL_PATH})")
     parser.add_argument("--debug", action="store_true",
                         help="Print every SimConnect update to stdout")
     args = parser.parse_args()
 
-    asyncio.run(_main(args.host, args.port, args.debug))
+    asyncio.run(_main(args.host, args.port, args.dll, args.debug))
