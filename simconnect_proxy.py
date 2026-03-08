@@ -117,7 +117,7 @@ _connected_clients: set = set()
 # SimConnect polling thread
 # ---------------------------------------------------------------------------
 
-def _poll_simconnect(stop_event: threading.Event) -> None:
+def _poll_simconnect(stop_event: threading.Event, debug: bool = False) -> None:
     while not stop_event.is_set():
         if not SIMCONNECT_AVAILABLE:
             print("[SC] SimConnect not installed. Install with: pip install SimConnect")
@@ -127,24 +127,40 @@ def _poll_simconnect(stop_event: threading.Event) -> None:
         try:
             print("[SC] Connecting to SimConnect…")
             sm = SimConnect()
-            aq = AircraftRequests(sm, _time=200)  # 200 ms internal refresh
+            # _time=0: always fetch fresh data, never serve stale cache
+            aq = AircraftRequests(sm, _time=0)
             print("[SC] Connected. Polling…")
 
+            errors_seen: set = set()
+
             while not stop_event.is_set():
+                # Drain the SimConnect message queue before reading
+                sm.get_next_dispatch()
+
                 updates: dict = {}
                 for our_key, (sc_var, transform) in SIMVAR_MAP.items():
                     if our_key not in _sim_state:
                         continue
                     try:
                         raw = aq.get(sc_var)
-                        updates[our_key] = transform(raw)
-                    except Exception:
-                        pass  # leave previous value intact
+                        if raw is not None:
+                            updates[our_key] = transform(raw)
+                        elif our_key not in errors_seen:
+                            print(f"[SC] {sc_var!r} returned None "
+                                  f"(variable name may be wrong for this aircraft)")
+                            errors_seen.add(our_key)
+                    except Exception as exc:
+                        if our_key not in errors_seen:
+                            print(f"[SC] Error reading {sc_var!r}: {exc}")
+                            errors_seen.add(our_key)
 
                 with _state_lock:
                     _sim_state.update(updates)
 
-                stop_event.wait(0.25)  # poll at ~4 Hz; WS broadcasts at 2 Hz
+                if debug and updates:
+                    print(f"[SC] {updates}")
+
+                stop_event.wait(0.25)
 
         except Exception as exc:
             print(f"[SC] Error: {exc!r} — retrying in 5 s…")
@@ -183,7 +199,7 @@ async def _broadcast_loop() -> None:
         )
 
 
-async def _main(host: str, port: int) -> None:
+async def _main(host: str, port: int, debug: bool = False) -> None:
     stop_future = asyncio.get_event_loop().create_future()
     loop = asyncio.get_event_loop()
 
@@ -200,7 +216,7 @@ async def _main(host: str, port: int) -> None:
 
     # Start SimConnect poll thread
     sc_stop = threading.Event()
-    sc_thread = threading.Thread(target=_poll_simconnect, args=(sc_stop,), daemon=True)
+    sc_thread = threading.Thread(target=_poll_simconnect, args=(sc_stop, debug), daemon=True)
     sc_thread.start()
 
     async with serve(_ws_handler, host, port):
@@ -223,6 +239,8 @@ if __name__ == "__main__":
                         help="WebSocket listen address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=WS_PORT,
                         help=f"WebSocket port (default: {WS_PORT})")
+    parser.add_argument("--debug", action="store_true",
+                        help="Print every SimConnect update to stdout")
     args = parser.parse_args()
 
-    asyncio.run(_main(args.host, args.port))
+    asyncio.run(_main(args.host, args.port, args.debug))
