@@ -35,61 +35,86 @@ from config import SIMVARS, WS_PORT, SC_DLL_PATH
 # Unmapped keys (e.g. MASTER_WARNING) stay at their default (False / 0).
 # ---------------------------------------------------------------------------
 
+
 def _b(v):
     """float → bool"""
     return bool(v)
 
 
-SIMVAR_MAP: dict[str, tuple[str, str | None, callable]] = {
+SIMVAR_MAP: dict[str, tuple[str | list[str], str | None, callable]] = {
     # --- Lights ---
-    "LIGHT_LANDING_LEFT":    ("LIGHT LANDING",               "Bool",                   _b),
-    "LIGHT_LANDING_RIGHT":   ("LIGHT LANDING",               "Bool",                   _b),
-    "LIGHT_STROBE":          ("LIGHT STROBE",                "Bool",                   _b),
-    "LIGHT_NAV":             ("LIGHT NAV",                   "Bool",                   _b),
-    "LIGHT_BEACON":          ("LIGHT BEACON",                "Bool",                   _b),
-    "LIGHT_TAXI":            ("LIGHT TAXI",                  "Bool",                   _b),
-
+    "LIGHT_LANDING_LEFT": ("LIGHT LANDING", "Bool", _b),
+    "LIGHT_LANDING_RIGHT": ("LIGHT LANDING", "Bool", _b),
+    "LIGHT_STROBE": ("LIGHT STROBE", "Bool", _b),
+    "LIGHT_NAV": ("LIGHT NAV", "Bool", _b),
+    "LIGHT_BEACON": ("LIGHT BEACON", "Bool", _b),
+    "LIGHT_TAXI": ("LIGHT TAXI", "Bool", _b),
     # --- Engines ---
-    "ENGINE_1_RUNNING":      ("GENERAL ENG COMBUSTION:1",    "Bool",                   _b),
-    "ENGINE_2_RUNNING":      ("GENERAL ENG COMBUSTION:2",    "Bool",                   _b),
-
+    "ENGINE_1_RUNNING": ("GENERAL ENG COMBUSTION:1", "Bool", _b),
+    "ENGINE_2_RUNNING": ("GENERAL ENG COMBUSTION:2", "Bool", _b),
     # --- Systems ---
-    "GEAR_DEPLOYED":         ("GEAR TOTAL PCT EXTENDED",     "Percent Over 100",       lambda v: float(v) > 0.95),
-    "ANTI_ICE_ON":           ("STRUCTURAL DEICE SWITCH",     "Bool",                   _b),
-    "PITOT_HEAT":            ("PITOT HEAT",                  "Bool",                   _b),
-    "PARKING_BRAKE":         ("BRAKE PARKING INDICATOR",     "Bool",                   _b),
-
+    "GEAR_DEPLOYED": (
+        "GEAR TOTAL PCT EXTENDED",
+        "Percent Over 100",
+        lambda v: float(v) > 0.95,
+    ),
+    "ANTI_ICE_ON": ("STRUCTURAL DEICE SWITCH", "Bool", _b),
+    "PITOT_HEAT": ("PITOT HEAT", "Bool", _b),
+    "PARKING_BRAKE": ("BRAKE PARKING INDICATOR", "Bool", _b),
     # --- Annunciators ---
-    # MASTER_WARNING / MASTER_CAUTION have no universal SimConnect variable;
-    # most airliners expose them as L:vars via WASM. Add them here once you
-    # know your aircraft's specific variable names.
-    # "MASTER_WARNING":      ("L:Generic_Master_Warning_Active", "Bool",               _b),
-    # "MASTER_CAUTION":      ("L:Generic_Master_Caution_Active", "Bool",               _b),
-
-    "HYD_PRESSURE_WARNING":  ("HYDRAULIC PRESSURE:1",        "Pounds per square inch", lambda v: float(v) < 1500),
-    "STALL_WARNING":         ("STALL WARNING",               "Bool",                   _b),
-    "OVERSPEED":             ("OVERSPEED WARNING",           "Bool",                   _b),
+    # List multiple L:var names to support different aircraft — any() of results is used.
+    "MASTER_WARNING": (
+        [
+            "L:INI_ATLEASTONEMASTERWARNING",  # iniBuilds A321 (default MSFS 2024)
+            "L:A32NX_MASTER_WARNING",  # FlyByWire A32NX
+        ],
+        "Bool",
+        _b,
+    ),
+    "MASTER_CAUTION": (
+        [
+            "L:INI_ATLEASTONEMASTERCAUTION",  # iniBuilds A321 (default MSFS 2024)
+            "L:A32NX_MASTER_CAUTION",  # FlyByWire A32NX
+        ],
+        "Bool",
+        _b,
+    ),
+    "HYD_PRESSURE_WARNING": (
+        "HYDRAULIC PRESSURE:1",
+        "Pounds per square inch",
+        lambda v: float(v) < 1500,
+    ),
+    "STALL_WARNING": ("STALL WARNING", "Bool", _b),
+    "OVERSPEED": ("OVERSPEED WARNING", "Bool", _b),
     # Oil: warn below 10 PSI (adjust threshold to aircraft)
-    "OIL_PRESSURE_LOW":      ("ENG OIL PRESSURE:1",         "Pounds per square inch", lambda v: float(v) < 10),
+    "OIL_PRESSURE_LOW": (
+        "ENG OIL PRESSURE:1",
+        "Pounds per square inch",
+        lambda v: float(v) < 10,
+    ),
     # Fuel: warn when tank < 10 US gallons (adjust threshold to aircraft)
-    "LOW_FUEL_L":            ("FUEL TANK LEFT MAIN QUANTITY",  "Gallons",              lambda v: float(v) < 10),
-    "LOW_FUEL_R":            ("FUEL TANK RIGHT MAIN QUANTITY", "Gallons",              lambda v: float(v) < 10),
+    "LOW_FUEL_L": ("FUEL TANK LEFT MAIN QUANTITY", "Gallons", lambda v: float(v) < 10),
+    "LOW_FUEL_R": ("FUEL TANK RIGHT MAIN QUANTITY", "Gallons", lambda v: float(v) < 10),
     # Door: EXIT OPEN:0 is the main cabin door on most aircraft
-    "DOOR_OPEN":             ("EXIT OPEN:0",                 "Percent Over 100",       lambda v: float(v) > 0.1),
-
+    "DOOR_OPEN": ("EXIT OPEN:0", "Percent Over 100", lambda v: float(v) > 0.1),
     # --- Gauges ---
-    "FLAPS_POSITION":        ("FLAPS HANDLE INDEX",          "Number",                 lambda v: int(v)),
+    "FLAPS_POSITION": ("FLAPS HANDLE INDEX", "Number", lambda v: int(v)),
     # Spoilers: 0–100 % (some aircraft use a 0.0–1.0 range — check and adjust)
-    "SPOILER_POSITION":      ("SPOILERS HANDLE POSITION",    "Percent",                lambda v: round(float(v), 1)),
+    "SPOILER_POSITION": (
+        "SPOILERS HANDLE POSITION",
+        "Percent",
+        lambda v: round(float(v), 1),
+    ),
 }
 
-# Build deduplicated subscription spec (some internal keys share the same SC var)
+# Build deduplicated subscription spec (some keys share vars, or have a list of vars)
 _SC_SPEC: list[dict] = []
 _sc_vars_seen: set[str] = set()
 for _our_key, (_sc_var, _units, _) in SIMVAR_MAP.items():
-    if _sc_var not in _sc_vars_seen:
-        _sc_vars_seen.add(_sc_var)
-        _SC_SPEC.append({"name": _sc_var, "units": _units})
+    for _v in _sc_var if isinstance(_sc_var, list) else [_sc_var]:
+        if _v not in _sc_vars_seen:
+            _sc_vars_seen.add(_v)
+            _SC_SPEC.append({"name": _v, "units": _units})
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +131,10 @@ _connected_clients: set = set()
 # SimConnect polling thread
 # ---------------------------------------------------------------------------
 
-def _poll_simconnect(stop_event: threading.Event, dll_path: str, debug: bool = False) -> None:
+
+def _poll_simconnect(
+    stop_event: threading.Event, dll_path: str, debug: bool = False
+) -> None:
     from simconnect import SimConnect
     from simconnect.datadef import DataDefinition
     from simconnect.scdefs import PERIOD_SECOND
@@ -129,12 +157,18 @@ def _poll_simconnect(stop_event: threading.Event, dll_path: str, debug: bool = F
 
                     updates: dict = {}
                     for our_key, (sc_var, _, transform) in SIMVAR_MAP.items():
-                        val = dd.simdata.get(sc_var)
-                        if val is not None:
-                            try:
-                                updates[our_key] = transform(val)
-                            except Exception:
-                                pass
+                        sc_vars = sc_var if isinstance(sc_var, list) else [sc_var]
+                        try:
+                            vals = [
+                                transform(dd.simdata[v])
+                                for v in sc_vars
+                                if dd.simdata.get(v) is not None
+                            ]
+                        except Exception:
+                            vals = []
+                        if not vals:
+                            continue
+                        updates[our_key] = any(vals) if len(sc_vars) > 1 else vals[0]
 
                     with _state_lock:
                         _sim_state.update(updates)
@@ -152,6 +186,7 @@ def _poll_simconnect(stop_event: threading.Event, dll_path: str, debug: bool = F
 # ---------------------------------------------------------------------------
 # WebSocket server
 # ---------------------------------------------------------------------------
+
 
 async def _ws_handler(websocket) -> None:
     _connected_clients.add(websocket)
@@ -203,7 +238,7 @@ async def _main(host: str, port: int, dll_path: str, debug: bool = False) -> Non
 
     async with serve(_ws_handler, host, port):
         print(f"[WS] Listening on ws://{host}:{port}")
-        print(f"     Point display.py WS_HOST to this machine's IP address.")
+        print(f"     Point display.py WS_HOST to this machine's IP address.")  # noqa: F541
         asyncio.create_task(_broadcast_loop())
         await stop_future
 
@@ -217,14 +252,20 @@ async def _main(host: str, port: int, dll_path: str, debug: bool = False) -> Non
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SimConnect → WebSocket proxy")
-    parser.add_argument("--host", default="0.0.0.0",
-                        help="WebSocket listen address (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=WS_PORT,
-                        help=f"WebSocket port (default: {WS_PORT})")
-    parser.add_argument("--dll", default=SC_DLL_PATH,
-                        help=f"Path to SimConnect.dll (default: {SC_DLL_PATH})")
-    parser.add_argument("--debug", action="store_true",
-                        help="Print every SimConnect update to stdout")
+    parser.add_argument(
+        "--host", default="0.0.0.0", help="WebSocket listen address (default: 0.0.0.0)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=WS_PORT, help=f"WebSocket port (default: {WS_PORT})"
+    )
+    parser.add_argument(
+        "--dll",
+        default=SC_DLL_PATH,
+        help=f"Path to SimConnect.dll (default: {SC_DLL_PATH})",
+    )
+    parser.add_argument(
+        "--debug", action="store_true", help="Print every SimConnect update to stdout"
+    )
     args = parser.parse_args()
 
     asyncio.run(_main(args.host, args.port, args.dll, args.debug))
