@@ -68,8 +68,11 @@ async def main():
             stop.set_result(None)
 
     loop = asyncio.get_event_loop()
-    loop.add_signal_handler(signal.SIGINT, shutdown)
-    loop.add_signal_handler(signal.SIGTERM, shutdown)
+    try:
+        loop.add_signal_handler(signal.SIGINT, shutdown)
+        loop.add_signal_handler(signal.SIGTERM, shutdown)
+    except NotImplementedError:
+        signal.signal(signal.SIGINT, lambda *_: loop.call_soon_threadsafe(shutdown))
 
     async with serve(handler, WS_HOST, WS_PORT):
         print(f"Mock server listening on ws://{WS_HOST}:{WS_PORT}")

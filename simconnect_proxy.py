@@ -191,8 +191,12 @@ async def _main(host: str, port: int) -> None:
         if not stop_future.done():
             stop_future.set_result(None)
 
-    loop.add_signal_handler(signal.SIGINT, _shutdown)
-    loop.add_signal_handler(signal.SIGTERM, _shutdown)
+    try:
+        loop.add_signal_handler(signal.SIGINT, _shutdown)
+        loop.add_signal_handler(signal.SIGTERM, _shutdown)
+    except NotImplementedError:
+        # Windows: fall back to signal.signal (Ctrl+C still works)
+        signal.signal(signal.SIGINT, lambda *_: loop.call_soon_threadsafe(_shutdown))
 
     # Start SimConnect poll thread
     sc_stop = threading.Event()
