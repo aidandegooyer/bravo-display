@@ -134,9 +134,6 @@ def _poll_simconnect(stop_event: threading.Event, debug: bool = False) -> None:
             errors_seen: set = set()
 
             while not stop_event.is_set():
-                # Drain the SimConnect message queue before reading
-                sm.get_next_dispatch()
-
                 updates: dict = {}
                 for our_key, (sc_var, transform) in SIMVAR_MAP.items():
                     if our_key not in _sim_state:
