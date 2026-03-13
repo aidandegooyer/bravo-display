@@ -1,7 +1,9 @@
 import asyncio
 import json
+import math
 import random
 import signal
+import time
 
 from websockets.asyncio.server import serve
 
@@ -9,6 +11,46 @@ from config import WS_HOST, WS_PORT, SIMVARS
 
 _gauge_keys = {k for k, v in SIMVARS.items() if v.get("type") == "gauge"}
 sim_state = {k: (0 if k in _gauge_keys else False) for k in SIMVARS}
+
+# PFD defaults — updated each broadcast by _pfd_animate()
+_PFD_DEFAULTS: dict = {
+    "airspeed":          150.0,
+    "ground_speed":      181.0,
+    "altitude":          3000.0,
+    "radio_alt":         2400.0,
+    "vertical_speed":    -800.0,
+    "baro_setting":      "29.92",
+    "pitch":             -2.5,
+    "bank":              5.0,
+    "heading":           320.0,
+    "fd_pitch":          -2.5,
+    "fd_bank":           5.0,
+    "autopilot_active":  True,
+    "at_active":         True,
+    "lnav_active":       True,
+    "vnav_active":       True,
+    "app_active":        False,
+    "loc_active":        False,
+    "selected_speed":    148.0,
+    "selected_altitude": 2000.0,
+    "selected_heading":  315.0,
+    "flaps":             5,
+}
+sim_state.update(_PFD_DEFAULTS)
+
+
+def _pfd_animate() -> None:
+    """Update PFD vars with sinusoidal motion to simulate live flight."""
+    t = time.monotonic()
+    sim_state["pitch"]        = -2.5 + 3.0  * math.sin(t * 0.3)
+    sim_state["bank"]         =  5.0 + 10.0 * math.sin(t * 0.2)
+    sim_state["heading"]      = (320 + 5 * math.sin(t * 0.15)) % 360
+    sim_state["airspeed"]     = 150 + 10 * math.sin(t * 0.25)
+    sim_state["altitude"]     = max(200.0, 3000 - (t % 3600) * 0.22)
+    sim_state["radio_alt"]    = max(0.0, sim_state["altitude"] - 600)
+    sim_state["fd_pitch"]     = sim_state["pitch"] + 0.5 * math.sin(t * 0.4)
+    sim_state["fd_bank"]      = sim_state["bank"]  + 1.0 * math.sin(t * 0.35)
+    sim_state["ground_speed"] = 181 + 3 * math.sin(t * 0.18)
 connected_clients: set = set()
 
 
@@ -26,6 +68,7 @@ async def handler(websocket):
 async def broadcast_loop():
     while True:
         await asyncio.sleep(0.5)
+        _pfd_animate()
         if not connected_clients:
             continue
         msg = json.dumps(sim_state)

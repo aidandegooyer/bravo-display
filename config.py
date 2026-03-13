@@ -100,6 +100,7 @@ WINDOW_HEIGHT = DISPLAY_HEIGHT
 
 # WebSocket server
 WS_HOST = "10.0.0.158"
+# WS_HOST = "localhost"
 WS_PORT = 8765
 
 # Path to SimConnect.dll — override if your SDK is installed elsewhere

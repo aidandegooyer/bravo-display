@@ -105,6 +105,37 @@ SIMVAR_MAP: dict[str, tuple[str | list[str], str | None, callable]] = {
         "Percent",
         lambda v: round(float(v), 1),
     ),
+    # -------------------------------------------------------------------------
+    # PFD — Primary Flight Display vars
+    # -------------------------------------------------------------------------
+    # --- Air data ---
+    "airspeed":         ("AIRSPEED INDICATED",            "Knots",           lambda v: round(float(v), 1)),
+    "ground_speed":     ("GROUND VELOCITY",               "Knots",           lambda v: round(float(v), 1)),
+    "altitude":         ("INDICATED ALTITUDE",            "Feet",            lambda v: round(float(v), 1)),
+    "radio_alt":        ("PLANE ALT ABOVE GROUND",        "Feet",            lambda v: round(float(v), 1)),
+    "vertical_speed":   ("VERTICAL SPEED",                "Feet per minute", lambda v: round(float(v), 0)),
+    "baro_setting":     ("KOHLSMAN SETTING HG",           "inHg",            lambda v: f"{float(v):.2f}"),
+    # --- Attitude ---
+    # Positive pitch = nose up; positive bank = right wing down (left roll)
+    "pitch":            ("PLANE PITCH DEGREES",           "Degrees",         lambda v: round(float(v), 2)),
+    "bank":             ("PLANE BANK DEGREES",            "Degrees",         lambda v: round(float(v), 2)),
+    "heading":          ("PLANE HEADING DEGREES MAGNETIC","Degrees",         lambda v: round(float(v), 1)),
+    # --- Flight director ---
+    "fd_pitch":         ("AUTOPILOT FLIGHT DIRECTOR PITCH","Degrees",        lambda v: round(float(v), 2)),
+    "fd_bank":          ("AUTOPILOT FLIGHT DIRECTOR BANK", "Degrees",        lambda v: round(float(v), 2)),
+    # --- Autopilot modes ---
+    "autopilot_active": ("AUTOPILOT MASTER",              "Bool",            _b),
+    "at_active":        ("AUTOPILOT THROTTLE ARM",        "Bool",            _b),
+    "lnav_active":      ("AUTOPILOT NAV1 LOCK",           "Bool",            _b),
+    "vnav_active":      ("AUTOPILOT ALTITUDE LOCK",       "Bool",            _b),
+    "app_active":       ("AUTOPILOT APPROACH HOLD",       "Bool",            _b),
+    "loc_active":       ("AUTOPILOT NAV1 LOCK",           "Bool",            _b),
+    # --- Autopilot selected values ---
+    "selected_speed":   ("AUTOPILOT AIRSPEED HOLD VAR",   "Knots",           lambda v: round(float(v), 0)),
+    "selected_altitude":("AUTOPILOT ALTITUDE LOCK VAR",   "Feet",            lambda v: round(float(v), 0)),
+    "selected_heading": ("AUTOPILOT HEADING LOCK DIR",    "Degrees",         lambda v: round(float(v), 1)),
+    # --- Flaps (shared with annunciator panel) ---
+    "flaps":            ("FLAPS HANDLE INDEX",            "Number",          lambda v: int(v)),
 }
 
 # Build deduplicated subscription spec (some keys share vars, or have a list of vars)

@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=480, initial-scale=1.0">
+<title>PFD</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+  canvas { display: block; }
+  #status { position: fixed; top: 4px; right: 4px; color: #ff0; font: 10px monospace; opacity: 0.7; }
+</style>
+</head>
+<body>
+<canvas id="pfd" width="480" height="800"></canvas>
+<div id="status">NO WS</div>
+<script>
+"use strict";
+
+// ─── Config ───────────────────────────────────────────────────────────────────
+//const SIM_IP   = window.location.hostname || "localhost";
+const SIM_IP = "10.0.0.158";
+const WS_URL   = `ws://${SIM_IP}:8765`;
+const SIMULATE = false;
+
+// ─── Colors ───────────────────────────────────────────────────────────────────
+const C = {
+  SKY:       "#0055CC",
+  GROUND:    "#5C3A1E",
+  GREEN:     "#00FF00",
+  MAGENTA:   "#FF00FF",
+  CYAN:      "#00FFFF",
+  WHITE:     "#FFFFFF",
+  AMBER:     "#FFAA00",
+  RED:       "#FF0000",
+  DARK:      "#1A1A1A",
+  TAPE:      "#222222",
+  PANEL:     "#111111",
+  BORDER:    "#444444",
+  FD:        "#FF00FF",
+  AP_GREEN:  "#00EE00",
+  LABEL:     "#AAAAAA",
+};
+
+// ─── Layout constants ─────────────────────────────────────────────────────────
+const W = 480, H = 800;
+
+const STATUS_Y  = 0,   STATUS_H  = 30;
+const INST_Y    = 30,  INST_H    = 590;  // Y:30 → 620
+const HDG_Y     = 620, HDG_H     = 100;  // Y:620 → 720
+const BOT_Y     = 720, BOT_H     = 80;   // Y:720 → 800
+
+// Instrument band x-ranges
+const SPD_X = 0,   SPD_W = 110;
+const ATT_X = 110, ATT_W = 260;
+const ALT_X = 370, ALT_W = 70;
+const VS_X  = 440, VS_W  = 40;
+
+const ATT_CX = ATT_X + ATT_W / 2;  // 240
+const ATT_CY = INST_Y + INST_H / 2; // 325
+
+const FONT  = '"Consolas","Courier New",monospace';
+
+// ─── State ────────────────────────────────────────────────────────────────────
+const _DEFAULTS = {
+  airspeed:          150,
+  selected_speed:    148,
+  altitude:          3000,
+  selected_altitude: 2000,
+  heading:           320,
+  selected_heading:  315,
+  pitch:             -2.5,
+  bank:              5,
+  vertical_speed:    -800,
+  autopilot_active:  true,
+  lnav_active:       true,
+  vnav_active:       true,
+  baro_setting:      "29.92",
+  ground_speed:      181,
+  fd_pitch:          -2.5,
+  fd_bank:           5,
+  at_active:         true,
+  app_active:        false,
+  loc_active:        false,
+  flaps:             5,
+  radio_alt:         2400,
+};
+
+// targetData  = latest values from WS / simulation (may jump 500ms apart)
+// simData     = smoothed values actually rendered (interpolated at 60fps)
+let targetData = Object.assign({}, _DEFAULTS);
+let simData    = Object.assign({}, _DEFAULTS);
+
+// Keys to smooth numerically (booleans and strings pass through immediately)
+const SMOOTH_KEYS   = ["airspeed","altitude","pitch","bank","heading","vertical_speed",
+                       "ground_speed","fd_pitch","fd_bank","radio_alt",
+                       "selected_speed","selected_altitude","selected_heading"];
+// Angular keys need shortest-path interpolation to avoid spinning through 0/360
+const ANGULAR_KEYS  = new Set(["heading", "selected_heading"]);
+const SMOOTH_TAU    = 0.08; // RC time constant in seconds (~80 ms)
+
+// Boolean / string keys copy over immediately
+const PASSTHROUGH_KEYS = ["autopilot_active","at_active","lnav_active","vnav_active",
+                          "app_active","loc_active","baro_setting","flaps"];
+
+function smoothStep(dt) {
+  const k = 1 - Math.exp(-dt / SMOOTH_TAU);
+  for (const key of SMOOTH_KEYS) {
+    if (!(key in targetData)) continue;
+    let diff = targetData[key] - simData[key];
+    if (ANGULAR_KEYS.has(key)) {
+      // Take the short way around (max ±180°)
+      if (diff >  180) diff -= 360;
+      if (diff < -180) diff += 360;
+    }
+    simData[key] += diff * k;
+  }
+  for (const key of PASSTHROUGH_KEYS) {
+    if (key in targetData) simData[key] = targetData[key];
+  }
+}
+
+let wsConnected = false;
+let flash = false;
+let lastFlash = 0;
+
+// ─── WebSocket ────────────────────────────────────────────────────────────────
+function connectWS() {
+  if (SIMULATE) return;
+  const ws = new WebSocket(WS_URL);
+  ws.onopen  = () => { wsConnected = true; document.getElementById("status").textContent = "WS OK"; };
+  ws.onclose = () => { wsConnected = false; document.getElementById("status").textContent = "NO WS"; setTimeout(connectWS, 3000); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      Object.assign(targetData, d);
+    } catch {}
+  };
+}
+connectWS();
+
+// ─── Simulation ───────────────────────────────────────────────────────────────
+let simTime = 0;
+function updateSimulation(dt) {
+  if (!SIMULATE) return;
+  simTime += dt;
+  const t = simTime;
+  targetData.pitch    = -2.5 + 3.0  * Math.sin(t * 0.3);
+  targetData.bank     =  5.0 + 10.0 * Math.sin(t * 0.2);
+  targetData.heading  = (320 + 5 * Math.sin(t * 0.15) + 360) % 360;
+  targetData.airspeed = 150 + 10 * Math.sin(t * 0.25);
+  targetData.altitude = 3000 + (targetData.vertical_speed / 60) * t * 0.05;
+  if (targetData.altitude < 200) targetData.altitude = 200;
+  targetData.fd_pitch = targetData.pitch + 0.5 * Math.sin(t * 0.4);
+  targetData.fd_bank  = targetData.bank  + 1.0 * Math.sin(t * 0.35);
+  targetData.radio_alt = Math.max(0, targetData.altitude - 600 + 50 * Math.sin(t * 0.1));
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+function roundRect(ctx, x, y, w, h, r, fill, stroke) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+  if (fill)   { ctx.fillStyle = fill;   ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.stroke(); }
+}
+
+function label(ctx, txt, x, y, size, color, align, baseline) {
+  ctx.fillStyle   = color || C.WHITE;
+  ctx.font        = `${size}px ${FONT}`;
+  ctx.textAlign   = align    || "center";
+  ctx.textBaseline = baseline || "middle";
+  ctx.fillText(txt, x, y);
+}
+
+function box(ctx, txt, x, y, w, h, bg, fg, size) {
+  roundRect(ctx, x, y, w, h, 3, bg, C.BORDER);
+  label(ctx, txt, x + w/2, y + h/2, size || 16, fg || C.WHITE);
+}
+
+// ─── 1. Status Bar (autopilot annunciators) ───────────────────────────────────
+function drawStatusBar(ctx, data) {
+  ctx.fillStyle = C.PANEL;
+  ctx.fillRect(0, STATUS_Y, W, STATUS_H);
+
+  // Separator line
+  ctx.strokeStyle = C.BORDER;
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, STATUS_Y + STATUS_H); ctx.lineTo(W, STATUS_Y + STATUS_H); ctx.stroke();
+
+  const items = [
+    { txt: "FMC SPD", active: data.at_active,         col: C.GREEN   },
+    { txt: "LNAV",    active: data.lnav_active,        col: C.GREEN   },
+    { txt: "VNAV PTH",active: data.vnav_active,        col: C.GREEN   },
+    { txt: "CMD",     active: data.autopilot_active,   col: C.AP_GREEN },
+    { txt: "APP",     active: data.app_active,         col: C.GREEN   },
+    { txt: "LOC",     active: data.loc_active,         col: C.GREEN   },
+  ];
+
+  const cellW = W / items.length;
+  items.forEach((item, i) => {
+    const x = i * cellW + cellW/2;
+    const y = STATUS_Y + STATUS_H/2;
+    if (item.active) {
+      roundRect(ctx, i * cellW + 2, STATUS_Y + 2, cellW - 4, STATUS_H - 4, 2, "#002200", null);
+      label(ctx, item.txt, x, y, 11, item.col);
+    } else {
+      label(ctx, item.txt, x, y, 11, "#444444");
+    }
+  });
+}
+
+// ─── 2. Speed Tape ────────────────────────────────────────────────────────────
+function drawSpeedTape(ctx, data) {
+  const x = SPD_X, w = SPD_W;
+  const y = INST_Y, h = INST_H;
+  const cx = x + w; // right edge (border with AI)
+  const cy = y + h/2; // center (current speed reference line)
+
+  // Background
+  ctx.fillStyle = C.TAPE;
+  ctx.fillRect(x, y, w, h);
+
+  const spd = data.airspeed;
+  const PX_PER_KT = 6; // pixels per knot
+
+  // Clip to tape region
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.clip();
+
+  // Draw tick marks and labels
+  ctx.strokeStyle = C.WHITE;
+  ctx.lineWidth = 1;
+  const range = Math.ceil(h / 2 / PX_PER_KT) + 5;
+  const spdMin = Math.floor(spd - range);
+  const spdMax = Math.ceil(spd  + range);
+
+  for (let s = spdMin; s <= spdMax; s++) {
+    if (s < 0) continue;
+    const sy = cy - (s - spd) * PX_PER_KT;
+    if (sy < y - 5 || sy > y + h + 5) continue;
+
+    if (s % 10 === 0) {
+      // Major tick + label
+      ctx.beginPath();
+      ctx.moveTo(cx - 18, sy);
+      ctx.lineTo(cx, sy);
+      ctx.strokeStyle = C.WHITE;
+      ctx.stroke();
+      label(ctx, String(s), cx - 22, sy, 13, C.WHITE, "right", "middle");
+    } else if (s % 5 === 0) {
+      // Minor tick
+      ctx.beginPath();
+      ctx.moveTo(cx - 10, sy);
+      ctx.lineTo(cx, sy);
+      ctx.strokeStyle = C.WHITE;
+      ctx.stroke();
+    }
+  }
+
+  // Speed trend vector (6s projection)
+  const trend = (data.vertical_speed / 60) * 6; // approx airspeed trend placeholder
+  const trendPx = trend * PX_PER_KT * 0.1; // subtle
+  if (Math.abs(trendPx) > 2) {
+    ctx.strokeStyle = C.GREEN;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(cx - 5, cy);
+    ctx.lineTo(cx - 5, cy - trendPx);
+    ctx.stroke();
+  }
+
+  // Vref / speed bugs
+  const bugSpd = data.selected_speed;
+  const bugY = cy - (bugSpd - spd) * PX_PER_KT;
+  if (bugY >= y && bugY <= y + h) {
+    ctx.fillStyle = C.MAGENTA;
+    ctx.beginPath();
+    ctx.moveTo(cx, bugY);
+    ctx.lineTo(cx - 14, bugY - 6);
+    ctx.lineTo(cx - 14, bugY + 6);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  ctx.restore();
+
+  // Current speed box
+  const boxH = 30, boxW = w - 2;
+  roundRect(ctx, x + 1, cy - boxH/2, boxW, boxH, 3, C.DARK, C.WHITE);
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = C.WHITE;
+  ctx.strokeRect(x + 1, cy - boxH/2, boxW, boxH);
+  label(ctx, Math.round(spd).toString(), x + boxW/2, cy, 18, C.WHITE);
+
+  // Right border line
+  ctx.strokeStyle = C.BORDER;
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(cx, y); ctx.lineTo(cx, y + h); ctx.stroke();
+
+  // Selected speed at top
+  label(ctx, Math.round(data.selected_speed).toString(), x + w/2, y + 14, 13, C.MAGENTA);
+}
+
+// ─── 3. Attitude Indicator ────────────────────────────────────────────────────
+function drawAttitudeIndicator(ctx, data) {
+  const x = ATT_X, w = ATT_W;
+  const y = INST_Y, h = INST_H;
+  const cx = ATT_CX, cy = ATT_CY;
+
+  ctx.save();
+  // Clip to attitude region
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.clip();
+
+  // ── Sky / Ground rotation ──
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(-data.bank * Math.PI / 180);
+
+  const pitchOffsetPx = data.pitch * 8; // px per degree
+
+  // Sky (fill entire rotated area first)
+  ctx.fillStyle = C.SKY;
+  ctx.fillRect(-w * 4, -h * 4, w * 8, h * 8);
+
+  // Ground (overdraw below horizon line at -pitchOffsetPx)
+  ctx.fillStyle = C.GROUND;
+  ctx.fillRect(-w * 4, -pitchOffsetPx, w * 8, h * 4);
+
+  // Horizon line
+  ctx.strokeStyle = C.WHITE;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-w, -pitchOffsetPx);
+  ctx.lineTo(w,  -pitchOffsetPx);
+  ctx.stroke();
+
+  // ── Pitch ladder ──
+  ctx.strokeStyle = C.WHITE;
+  ctx.fillStyle   = C.WHITE;
+  ctx.lineWidth = 1.5;
+  const ladderFont = `10px ${FONT}`;
+  ctx.font = ladderFont;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+
+  for (let deg = -30; deg <= 30; deg += 2.5) {
+    if (deg === 0) continue;
+    const py = -pitchOffsetPx - deg * 8;
+    const isDivOf5 = (deg % 5 === 0);
+    const isDivOf10 = (deg % 10 === 0);
+    const len = isDivOf10 ? 60 : isDivOf5 ? 35 : 18;
+
+    ctx.beginPath();
+    ctx.moveTo(-len/2, py);
+    ctx.lineTo(len/2, py);
+    ctx.stroke();
+
+    if (isDivOf10) {
+      const degLabel = Math.abs(deg).toString();
+      ctx.fillText(degLabel, len/2 + 4, py);
+      ctx.textAlign = "right";
+      ctx.fillText(degLabel, -len/2 - 4, py);
+      ctx.textAlign = "left";
+    }
+  }
+
+  ctx.restore(); // undo bank rotation
+
+  // ── Bank arc ──
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  const arcR = Math.min(w, h) * 0.42;
+  ctx.strokeStyle = C.WHITE;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(0, 0, arcR, Math.PI * 1.1, Math.PI * 1.9);
+  ctx.stroke();
+
+  // Bank tick marks
+  [10, 20, 30, 45, 60].forEach(deg => {
+    [-deg, deg].forEach(d => {
+      const angle = (d - 90) * Math.PI / 180;
+      const inner = arcR - (Math.abs(d) % 30 === 0 ? 12 : 7);
+      ctx.strokeStyle = C.WHITE;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(angle) * inner, Math.sin(angle) * inner);
+      ctx.lineTo(Math.cos(angle) * arcR,  Math.sin(angle) * arcR);
+      ctx.stroke();
+    });
+  });
+
+  // Bank pointer (triangle at top of arc, rotated by bank)
+  const bankAngle = (-data.bank - 90) * Math.PI / 180;
+  const bpx = Math.cos(bankAngle) * (arcR - 2);
+  const bpy = Math.sin(bankAngle) * (arcR - 2);
+  ctx.save();
+  ctx.translate(bpx, bpy);
+  ctx.rotate(bankAngle + Math.PI/2);
+  ctx.fillStyle = C.WHITE;
+  ctx.beginPath();
+  ctx.moveTo(0, -8);
+  ctx.lineTo(-5, 4);
+  ctx.lineTo(5, 4);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+
+  ctx.restore(); // undo translate to cx,cy
+
+  // ── Flight Director bars ──
+  const fdBankPx  = (data.fd_bank  - data.bank)  * 5;
+  const fdPitchPx = (data.fd_pitch - data.pitch) * 8;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(-data.bank * Math.PI / 180);
+
+  // FD pitch bar (horizontal)
+  ctx.strokeStyle = C.FD;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(-55, -fdPitchPx);
+  ctx.lineTo( 55, -fdPitchPx);
+  ctx.stroke();
+
+  // FD bank bar (vertical)
+  ctx.beginPath();
+  ctx.moveTo(fdBankPx, -30);
+  ctx.lineTo(fdBankPx,  30);
+  ctx.stroke();
+
+  ctx.restore();
+
+  // ── Aircraft symbol (fixed, center) ──
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.strokeStyle = C.AMBER;
+  ctx.lineWidth = 3;
+  ctx.fillStyle   = C.AMBER;
+
+  // Wings
+  ctx.beginPath();
+  ctx.moveTo(-60, 0); ctx.lineTo(-20, 0);
+  ctx.moveTo( 20, 0); ctx.lineTo( 60, 0);
+  ctx.stroke();
+
+  // Fuselage dot
+  ctx.beginPath();
+  ctx.arc(0, 0, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Tail
+  ctx.beginPath();
+  ctx.moveTo(0, 0); ctx.lineTo(0, -12);
+  ctx.stroke();
+
+  ctx.restore();
+
+  // ── Slip/skid ball ──
+  ctx.save();
+  ctx.translate(cx, cy);
+  const bankRad = -data.bank * Math.PI / 180;
+  const ballX = clamp(Math.sin(bankRad) * 20, -25, 25);
+  const ballBaseY = -arcR + 20;
+  ctx.strokeStyle = C.WHITE;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(-20, ballBaseY);
+  ctx.lineTo( 20, ballBaseY);
+  ctx.stroke();
+  ctx.fillStyle = C.WHITE;
+  ctx.beginPath();
+  ctx.arc(ballX, ballBaseY, 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  ctx.restore(); // main clip
+
+  // Border lines
+  ctx.strokeStyle = C.BORDER;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x, y, w, h);
+}
+
+// ─── 4. Altitude Tape ─────────────────────────────────────────────────────────
+function drawAltitudeTape(ctx, data) {
+  const x = ALT_X, w = ALT_W;
+  const y = INST_Y, h = INST_H;
+  const cy = y + h/2;
+
+  ctx.fillStyle = C.TAPE;
+  ctx.fillRect(x, y, w, h);
+
+  const alt = data.altitude;
+  const PX_PER_FT = 0.15; // pixels per foot
+  const stepFt = 100;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.clip();
+
+  ctx.strokeStyle = C.WHITE;
+  ctx.lineWidth = 1;
+
+  const range = Math.ceil(h / 2 / PX_PER_FT / stepFt + 2) * stepFt;
+  const altMin = Math.floor(alt / stepFt) * stepFt - range;
+  const altMax = altMin + range * 2 + stepFt;
+
+  for (let a = altMin; a <= altMax; a += stepFt) {
+    const ay = cy - (a - alt) * PX_PER_FT;
+    if (ay < y - 5 || ay > y + h + 5) continue;
+
+    const isMajor = (a % 500 === 0);
+    const tickLen = isMajor ? 16 : 9;
+
+    ctx.beginPath();
+    ctx.moveTo(x, ay);
+    ctx.lineTo(x + tickLen, ay);
+    ctx.strokeStyle = C.WHITE;
+    ctx.stroke();
+
+    if (isMajor) {
+      label(ctx, Math.abs(a).toString(), x + 18, ay, 11, C.WHITE, "left", "middle");
+    }
+  }
+
+  // Selected altitude bug
+  const selAlt = data.selected_altitude;
+  const selAltY = cy - (selAlt - alt) * PX_PER_FT;
+  if (selAltY >= y && selAltY <= y + h) {
+    ctx.fillStyle = C.CYAN;
+    ctx.beginPath();
+    ctx.moveTo(x, selAltY);
+    ctx.lineTo(x + 16, selAltY - 7);
+    ctx.lineTo(x + 16, selAltY + 7);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  ctx.restore();
+
+  // Current altitude box
+  const boxH = 30, boxW = w - 2;
+  roundRect(ctx, x + 1, cy - boxH/2, boxW, boxH, 3, C.DARK, C.WHITE);
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = C.WHITE;
+  ctx.strokeRect(x + 1, cy - boxH/2, boxW, boxH);
+  label(ctx, Math.round(alt).toString(), x + boxW/2, cy, 14, C.WHITE);
+
+  // Selected altitude top
+  label(ctx, Math.round(data.selected_altitude).toString(), x + w/2, y + 14, 12, C.CYAN);
+
+  // Left border
+  ctx.strokeStyle = C.BORDER;
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + h); ctx.stroke();
+}
+
+// ─── 5. Vertical Speed Indicator ─────────────────────────────────────────────
+function drawVSIndicator(ctx, data) {
+  const x = VS_X, w = VS_W;
+  const y = INST_Y, h = INST_H;
+  const cx = x + w/2;
+  const cy = y + h/2;
+
+  ctx.fillStyle = C.PANEL;
+  ctx.fillRect(x, y, w, h);
+
+  // VS scale: center = 0, max ±2000 fpm mapped to ±h/2
+  const maxVS = 2000;
+  const vs = clamp(data.vertical_speed, -maxVS, maxVS);
+
+  // Scale ticks
+  const ticks = [0, 500, 1000, 1500, 2000];
+  ctx.strokeStyle = C.WHITE;
+  ctx.lineWidth = 1;
+  ticks.forEach(v => {
+    [-v, v].forEach(vv => {
+      if (v === 0 && vv !== 0) return;
+      const ty = cy - (vv / maxVS) * (h/2 - 10);
+      const tickLen = v % 1000 === 0 ? 12 : 7;
+      ctx.beginPath();
+      ctx.moveTo(x, ty);
+      ctx.lineTo(x + tickLen, ty);
+      ctx.stroke();
+      if (v > 0 && v % 1000 === 0) {
+        label(ctx, (v/1000).toString(), x + tickLen + 2, ty, 9, C.WHITE, "left", "middle");
+      }
+    });
+  });
+
+  // Pointer
+  const pointerY = cy - (vs / maxVS) * (h/2 - 10);
+  ctx.strokeStyle = C.WHITE;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x + w - 6, cy);
+  ctx.lineTo(x + w - 6, pointerY);
+  ctx.stroke();
+  // Arrow head
+  ctx.fillStyle = C.WHITE;
+  ctx.beginPath();
+  const dir = vs < 0 ? 1 : -1;
+  ctx.moveTo(x + w - 6, pointerY);
+  ctx.lineTo(x + w - 12, pointerY - dir * 6);
+  ctx.lineTo(x + w - 0,  pointerY - dir * 6);
+  ctx.closePath();
+  ctx.fill();
+
+  // VS value (only if significant)
+  if (Math.abs(vs) > 100) {
+    const vsText = (vs > 0 ? "+" : "") + Math.round(vs / 100) * 100;
+    label(ctx, vsText, cx, vs > 0 ? y + 20 : y + h - 20, 10, C.WHITE);
+  }
+
+  ctx.strokeStyle = C.BORDER;
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + h); ctx.stroke();
+}
+
+// ─── 6. Heading Tape ─────────────────────────────────────────────────────────
+function drawHeadingTape(ctx, data) {
+  const x = 0, w = W;
+  const y = HDG_Y, h = HDG_H;
+  const cy = y + h/2;
+  const cx = w/2;
+
+  ctx.fillStyle = C.TAPE;
+  ctx.fillRect(x, y, w, h);
+
+  // Separator lines
+  ctx.strokeStyle = C.BORDER;
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, y+h); ctx.lineTo(W, y+h); ctx.stroke();
+
+  const hdg = data.heading;
+  const PX_PER_DEG = 6;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.clip();
+
+  const cardinals = { 0: "N", 90: "E", 180: "S", 270: "W" };
+  const range = Math.ceil(w/2 / PX_PER_DEG) + 5;
+
+  for (let d = Math.floor(hdg - range); d <= Math.ceil(hdg + range); d++) {
+    const deg = ((d % 360) + 360) % 360;
+    const dx = cx + (d - hdg) * PX_PER_DEG;
+    if (dx < x - 20 || dx > x + w + 20) continue;
+
+    if (deg % 10 === 0) {
+      const tickH = deg % 30 === 0 ? 16 : 9;
+      ctx.strokeStyle = C.WHITE;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(dx, y + h - 5);
+      ctx.lineTo(dx, y + h - 5 - tickH);
+      ctx.stroke();
+
+      if (deg % 30 === 0) {
+        const txt = cardinals[deg] || (deg / 10).toString().padStart(2, "0");
+        label(ctx, txt, dx, y + 16, 13, C.WHITE);
+      }
+    } else if (deg % 5 === 0) {
+      ctx.strokeStyle = C.WHITE;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(dx, y + h - 5);
+      ctx.lineTo(dx, y + h - 5 - 6);
+      ctx.stroke();
+    }
+  }
+
+  // Selected heading bug
+  const selHdg = data.selected_heading;
+  let dhdg = ((selHdg - hdg + 540) % 360) - 180;
+  const bugX = cx + dhdg * PX_PER_DEG;
+  if (bugX >= x && bugX <= x + w) {
+    ctx.fillStyle = C.CYAN;
+    ctx.beginPath();
+    ctx.moveTo(bugX, y + h - 4);
+    ctx.lineTo(bugX - 8, y + 4);
+    ctx.lineTo(bugX + 8, y + 4);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  ctx.restore();
+
+  // Current heading box (center)
+  const boxW = 52, boxH = 26;
+  roundRect(ctx, cx - boxW/2, y + h - boxH - 2, boxW, boxH, 3, C.DARK, C.WHITE);
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = C.WHITE;
+  ctx.strokeRect(cx - boxW/2, y + h - boxH - 2, boxW, boxH);
+  label(ctx, Math.round(hdg).toString().padStart(3, "0"), cx, y + h - boxH/2 - 2, 16, C.WHITE);
+
+  // Reference line at center
+  ctx.strokeStyle = C.WHITE;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx, y);
+  ctx.lineTo(cx, y + 8);
+  ctx.stroke();
+
+  // MAG label
+  label(ctx, "MAG", W - 30, y + h - 14, 10, C.GREEN, "center");
+}
+
+// ─── 7. Bottom Info ───────────────────────────────────────────────────────────
+function drawBottomInfo(ctx, data) {
+  const y = BOT_Y, h = BOT_H;
+
+  ctx.fillStyle = C.PANEL;
+  ctx.fillRect(0, y, W, h);
+
+  // Separator
+  ctx.strokeStyle = C.BORDER;
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+
+  // Ground speed
+  label(ctx, "GS", 30, y + 18, 11, C.LABEL, "center");
+  label(ctx, Math.round(data.ground_speed).toString(), 30, y + 38, 16, C.WHITE, "center");
+
+  // Baro setting
+  label(ctx, "BARO", W/2, y + 18, 11, C.LABEL, "center");
+  label(ctx, data.baro_setting, W/2, y + 38, 16, C.GREEN, "center");
+
+  // Radio altimeter
+  if (data.radio_alt < 2500) {
+    const raColor = data.radio_alt < 200 ? C.AMBER : C.WHITE;
+    label(ctx, "RA", W - 50, y + 18, 11, C.LABEL, "center");
+    label(ctx, Math.round(data.radio_alt).toString(), W - 50, y + 38, 16, raColor, "center");
+  }
+
+  // Flaps indication
+  label(ctx, "FLAPS", 80, y + 18, 11, C.LABEL, "center");
+  label(ctx, data.flaps.toString(), 80, y + 38, 16, C.GREEN, "center");
+
+  // No data indicator when WS disconnected and not simulating
+  if (!SIMULATE && !wsConnected) {
+    ctx.fillStyle = "rgba(0,0,0,0.7)";
+    ctx.fillRect(0, 0, W, H);
+    label(ctx, "NO DATA", W/2, H/2, 36, C.RED);
+    label(ctx, "Waiting for SimConnect...", W/2, H/2 + 50, 14, C.AMBER);
+  }
+}
+
+// ─── Outer bezel / frame ──────────────────────────────────────────────────────
+function drawBezel(ctx) {
+  // Outer frame
+  ctx.strokeStyle = "#555555";
+  ctx.lineWidth = 3;
+  ctx.strokeRect(1, 1, W - 2, H - 2);
+}
+
+// ─── Main render loop ─────────────────────────────────────────────────────────
+const canvas = document.getElementById("pfd");
+const ctx    = canvas.getContext("2d");
+
+let lastTime = null;
+
+function render(ts) {
+  if (lastTime === null) lastTime = ts;
+  const dt = (ts - lastTime) / 1000;
+  lastTime = ts;
+
+  // Flash every ~500ms
+  if (ts - lastFlash > 500) {
+    flash = !flash;
+    lastFlash = ts;
+  }
+
+  updateSimulation(dt);
+  smoothStep(dt);
+
+  // Clear
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, W, H);
+
+  // Draw all regions
+  drawAttitudeIndicator(ctx, simData);  // draw AI first (background)
+  drawSpeedTape(ctx, simData);
+  drawAltitudeTape(ctx, simData);
+  drawVSIndicator(ctx, simData);
+  drawStatusBar(ctx, simData);
+  drawHeadingTape(ctx, simData);
+  drawBottomInfo(ctx, simData);
+  drawBezel(ctx);
+
+  requestAnimationFrame(render);
+}
+
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
