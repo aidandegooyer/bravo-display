@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WS Monitor</title>
+<style>
+  body { background: #111; color: #ccc; font: 14px "Consolas","Courier New",monospace; padding: 16px; }
+  h2 { color: #fff; margin: 0 0 12px; }
+  .grid { display: grid; grid-template-columns: 160px 1fr; gap: 4px 12px; margin-bottom: 16px; }
+  .k { color: #888; }
+  .v { color: #0f0; }
+  .v.warn { color: #fa0; }
+  .v.bad  { color: #f44; }
+  #log { border-top: 1px solid #333; padding-top: 10px; max-height: 340px; overflow-y: auto; }
+  .row { display: flex; gap: 12px; border-bottom: 1px solid #1e1e1e; padding: 2px 0; }
+  .row .t { color: #555; width: 80px; flex-shrink: 0; }
+  .row .i { color: #39f; width: 70px; flex-shrink: 0; }
+  .row .s { color: #888; width: 60px; flex-shrink: 0; }
+  .row .p { color: #aaa; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #controls { margin-bottom: 12px; }
+  button { background: #222; color: #ccc; border: 1px solid #444; padding: 4px 12px;
+           font: 13px monospace; cursor: pointer; margin-right: 6px; }
+  button:hover { background: #333; }
+  input { background: #1a1a1a; color: #ccc; border: 1px solid #444; padding: 3px 8px;
+          font: 13px monospace; width: 200px; }
+</style>
+</head>
+<body>
+<h2>WS Monitor</h2>
+
+<div id="controls">
+  <input id="url" value="ws://10.0.0.158:8765" />
+  <button id="btn">Connect</button>
+  <button id="clr">Clear log</button>
+</div>
+
+<div class="grid" id="stats">
+  <span class="k">Status</span>       <span class="v bad" id="s-status">DISCONNECTED</span>
+  <span class="k">Packets received</span> <span class="v" id="s-count">0</span>
+  <span class="k">Last interval</span> <span class="v" id="s-last">—</span>
+  <span class="k">Avg interval</span>  <span class="v" id="s-avg">—</span>
+  <span class="k">Min interval</span>  <span class="v" id="s-min">—</span>
+  <span class="k">Max interval</span>  <span class="v" id="s-max">—</span>
+  <span class="k">Jitter (σ)</span>   <span class="v" id="s-jitter">—</span>
+  <span class="k">Last packet size</span> <span class="v" id="s-size">—</span>
+  <span class="k">Keys in payload</span> <span class="v" id="s-keys">—</span>
+</div>
+
+<div id="log">
+  <div class="row" style="color:#555; border-color:#333;">
+    <span class="t">time</span>
+    <span class="i">interval</span>
+    <span class="s">bytes</span>
+    <span class="p">payload preview</span>
+  </div>
+</div>
+
+<script>
+let ws = null;
+let count = 0, lastTs = null;
+const intervals = [];
+const MAX_LOG = 100;
+
+const $ = id => document.getElementById(id);
+
+function ms(v) { return v == null ? "—" : v.toFixed(1) + " ms"; }
+function fmt(v, lo, hi) {
+  const el = document.createElement("span");
+  el.textContent = ms(v);
+  el.className = "v" + (v == null ? "" : v > hi ? " bad" : v > lo ? " warn" : "");
+  return el.outerHTML;
+}
+
+function stddev(arr) {
+  if (arr.length < 2) return null;
+  const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+  const variance = arr.reduce((s, x) => s + (x - mean) ** 2, 0) / arr.length;
+  return Math.sqrt(variance);
+}
+
+function updateStats(interval, raw) {
+  count++;
+  $("s-count").textContent = count;
+
+  if (interval != null) {
+    intervals.push(interval);
+    if (intervals.length > 200) intervals.shift();
+
+    const avg = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    const min = Math.min(...intervals);
+    const max = Math.max(...intervals);
+    const jitter = stddev(intervals);
+
+    $("s-last").innerHTML   = fmt(interval, 600, 1000);
+    $("s-avg").innerHTML    = fmt(avg,      600, 1000);
+    $("s-min").innerHTML    = fmt(min,      600, 1000);
+    $("s-max").innerHTML    = fmt(max,      600, 1000);
+    $("s-jitter").innerHTML = fmt(jitter,   50,  150);
+  }
+
+  const bytes = new TextEncoder().encode(raw).length;
+  $("s-size").textContent = bytes + " B";
+
+  try {
+    const keys = Object.keys(JSON.parse(raw));
+    $("s-keys").textContent = keys.length + "  (" + keys.join(", ") + ")";
+  } catch {
+    $("s-keys").textContent = "—";
+  }
+}
+
+function addLogRow(interval, raw) {
+  const log = $("log");
+  const now = new Date();
+  const t = now.toTimeString().slice(0, 8) + "." + String(now.getMilliseconds()).padStart(3, "0");
+  const bytes = new TextEncoder().encode(raw).length;
+  const preview = raw.length > 120 ? raw.slice(0, 120) + "…" : raw;
+
+  const row = document.createElement("div");
+  row.className = "row";
+  const iClass = interval == null ? "" : interval > 700 ? " style='color:#f44'" : interval > 560 ? " style='color:#fa0'" : "";
+  row.innerHTML = `<span class="t">${t}</span>` +
+    `<span class="i"${iClass}>${interval == null ? "first" : interval.toFixed(1) + " ms"}</span>` +
+    `<span class="s">${bytes} B</span>` +
+    `<span class="p">${preview.replace(/</g,"&lt;")}</span>`;
+  log.appendChild(row);
+
+  // Trim old rows
+  while (log.children.length > MAX_LOG + 1) log.children[1].remove();
+  log.scrollTop = log.scrollHeight;
+}
+
+function connect() {
+  if (ws) { ws.close(); ws = null; }
+  const url = $("url").value.trim();
+  count = 0; lastTs = null; intervals.length = 0;
+  ["s-count","s-last","s-avg","s-min","s-max","s-jitter","s-size","s-keys"]
+    .forEach(id => $("s-" + id.replace("s-","")).textContent = id === "s-count" ? "0" : "—");
+
+  $("s-status").textContent = "CONNECTING…";
+  $("s-status").className = "v warn";
+
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    $("s-status").textContent = "CONNECTED";
+    $("s-status").className = "v";
+    $("btn").textContent = "Disconnect";
+  };
+
+  ws.onclose = () => {
+    $("s-status").textContent = "DISCONNECTED";
+    $("s-status").className = "v bad";
+    $("btn").textContent = "Connect";
+    ws = null;
+  };
+
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = (e) => {
+    const now = performance.now();
+    const interval = lastTs == null ? null : now - lastTs;
+    lastTs = now;
+    updateStats(interval, e.data);
+    addLogRow(interval, e.data);
+  };
+}
+
+$("btn").onclick = () => {
+  if (ws) { ws.close(); }
+  else { connect(); }
+};
+
+$("clr").onclick = () => {
+  const log = $("log");
+  while (log.children.length > 1) log.children[1].remove();
+};
+</script>
+</body>
+</html>

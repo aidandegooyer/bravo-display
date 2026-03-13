@@ -87,37 +87,42 @@ const _DEFAULTS = {
   radio_alt:         2400,
 };
 
-// targetData  = latest values from WS / simulation (may jump 500ms apart)
-// simData     = smoothed values actually rendered (interpolated at 60fps)
-let targetData = Object.assign({}, _DEFAULTS);
-let simData    = Object.assign({}, _DEFAULTS);
+// Snapshot interpolation:
+//   snapPrev     — display position when last WS message arrived (= simData at that moment)
+//   snapCurr     — values from the last WS message
+//   snapTime     — performance.now() when snapCurr was recorded
+//   snapInterval — measured time between the last two WS messages (auto-adapts to any rate)
+//
+// Each frame: alpha = (now - snapTime) / snapInterval  →  lerp(snapPrev, snapCurr, alpha)
+// No hardcoded interval — works correctly at 100ms, 500ms, or any other broadcast rate.
 
-// Keys to smooth numerically (booleans and strings pass through immediately)
-const SMOOTH_KEYS   = ["airspeed","altitude","pitch","bank","heading","vertical_speed",
-                       "ground_speed","fd_pitch","fd_bank","radio_alt",
-                       "selected_speed","selected_altitude","selected_heading"];
-// Angular keys need shortest-path interpolation to avoid spinning through 0/360
-const ANGULAR_KEYS  = new Set(["heading", "selected_heading"]);
-const SMOOTH_TAU    = 0.08; // RC time constant in seconds (~80 ms)
-
-// Boolean / string keys copy over immediately
+const SMOOTH_KEYS    = ["airspeed","altitude","pitch","bank","heading","vertical_speed",
+                        "ground_speed","fd_pitch","fd_bank","radio_alt",
+                        "selected_speed","selected_altitude","selected_heading"];
+const ANGULAR_KEYS   = new Set(["heading", "selected_heading"]);
 const PASSTHROUGH_KEYS = ["autopilot_active","at_active","lnav_active","vnav_active",
-                          "app_active","loc_active","baro_setting","flaps"];
+                           "app_active","loc_active","baro_setting","flaps"];
 
-function smoothStep(dt) {
-  const k = 1 - Math.exp(-dt / SMOOTH_TAU);
+let snapPrev = Object.assign({}, _DEFAULTS);
+let snapCurr = Object.assign({}, _DEFAULTS);
+let snapTime = performance.now();
+let snapInterval = 500; // updated dynamically from measured WS cadence
+let simData  = Object.assign({}, _DEFAULTS); // rendered values
+
+function interpStep(ts) {
+  const alpha = Math.min(1, (ts - snapTime) / snapInterval);
   for (const key of SMOOTH_KEYS) {
-    if (!(key in targetData)) continue;
-    let diff = targetData[key] - simData[key];
+    const a = snapPrev[key], b = snapCurr[key];
+    if (typeof a !== "number" || typeof b !== "number") continue;
+    let diff = b - a;
     if (ANGULAR_KEYS.has(key)) {
-      // Take the short way around (max ±180°)
       if (diff >  180) diff -= 360;
       if (diff < -180) diff += 360;
     }
-    simData[key] += diff * k;
+    simData[key] = a + diff * alpha;
   }
   for (const key of PASSTHROUGH_KEYS) {
-    if (key in targetData) simData[key] = targetData[key];
+    simData[key] = snapCurr[key];
   }
 }
 
@@ -135,7 +140,11 @@ function connectWS() {
   ws.onmessage = (e) => {
     try {
       const d = JSON.parse(e.data);
-      Object.assign(targetData, d);
+      const now = performance.now();
+      snapInterval = now - snapTime;   // measure real cadence
+      snapPrev = Object.assign({}, simData); // start lerp from where display currently is
+      Object.assign(snapCurr, d);
+      snapTime = now;
     } catch {}
   };
 }
@@ -147,15 +156,16 @@ function updateSimulation(dt) {
   if (!SIMULATE) return;
   simTime += dt;
   const t = simTime;
-  targetData.pitch    = -2.5 + 3.0  * Math.sin(t * 0.3);
-  targetData.bank     =  5.0 + 10.0 * Math.sin(t * 0.2);
-  targetData.heading  = (320 + 5 * Math.sin(t * 0.15) + 360) % 360;
-  targetData.airspeed = 150 + 10 * Math.sin(t * 0.25);
-  targetData.altitude = 3000 + (targetData.vertical_speed / 60) * t * 0.05;
-  if (targetData.altitude < 200) targetData.altitude = 200;
-  targetData.fd_pitch = targetData.pitch + 0.5 * Math.sin(t * 0.4);
-  targetData.fd_bank  = targetData.bank  + 1.0 * Math.sin(t * 0.35);
-  targetData.radio_alt = Math.max(0, targetData.altitude - 600 + 50 * Math.sin(t * 0.1));
+  // Write directly to simData — no interpolation needed at 60fps
+  simData.pitch    = -2.5 + 3.0  * Math.sin(t * 0.3);
+  simData.bank     =  5.0 + 10.0 * Math.sin(t * 0.2);
+  simData.heading  = (320 + 5 * Math.sin(t * 0.15) + 360) % 360;
+  simData.airspeed = 150 + 10 * Math.sin(t * 0.25);
+  simData.altitude = 3000 + (simData.vertical_speed / 60) * t * 0.05;
+  if (simData.altitude < 200) simData.altitude = 200;
+  simData.fd_pitch = simData.pitch + 0.5 * Math.sin(t * 0.4);
+  simData.fd_bank  = simData.bank  + 1.0 * Math.sin(t * 0.35);
+  simData.radio_alt = Math.max(0, simData.altitude - 600 + 50 * Math.sin(t * 0.1));
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -809,7 +819,7 @@ function render(ts) {
   }
 
   updateSimulation(dt);
-  smoothStep(dt);
+  if (!SIMULATE) interpStep(ts);
 
   // Clear
   ctx.fillStyle = "#000000";
