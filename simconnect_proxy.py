@@ -109,33 +109,61 @@ SIMVAR_MAP: dict[str, tuple[str | list[str], str | None, callable]] = {
     # PFD — Primary Flight Display vars
     # -------------------------------------------------------------------------
     # --- Air data ---
-    "airspeed":         ("AIRSPEED INDICATED",            "Knots",           lambda v: round(float(v), 1)),
-    "ground_speed":     ("GROUND VELOCITY",               "Knots",           lambda v: round(float(v), 1)),
-    "altitude":         ("INDICATED ALTITUDE",            "Feet",            lambda v: round(float(v), 1)),
-    "radio_alt":        ("PLANE ALT ABOVE GROUND",        "Feet",            lambda v: round(float(v), 1)),
-    "vertical_speed":   ("VERTICAL SPEED",                "Feet per minute", lambda v: round(float(v), 0)),
-    "baro_setting":     ("KOHLSMAN SETTING HG",           "inHg",            lambda v: f"{float(v):.2f}"),
+    "airspeed": ("AIRSPEED INDICATED", "Knots", lambda v: round(float(v), 1)),
+    "ground_speed": ("GROUND VELOCITY", "Knots", lambda v: round(float(v), 1)),
+    "altitude": ("INDICATED ALTITUDE", "Feet", lambda v: round(float(v), 1)),
+    "radio_alt": ("PLANE ALT ABOVE GROUND", "Feet", lambda v: round(float(v), 1)),
+    "vertical_speed": (
+        "VERTICAL SPEED",
+        "Feet per minute",
+        lambda v: round(float(v), 0),
+    ),
+    "baro_setting": ("KOHLSMAN SETTING HG", "inHg", lambda v: f"{float(v):.2f}"),
     # --- Attitude ---
     # Positive pitch = nose up; positive bank = right wing down (left roll)
-    "pitch":            ("PLANE PITCH DEGREES",           "Degrees",         lambda v: round(float(v), 2)),
-    "bank":             ("PLANE BANK DEGREES",            "Degrees",         lambda v: round(float(v), 2)),
-    "heading":          ("PLANE HEADING DEGREES MAGNETIC","Degrees",         lambda v: round(float(v), 1)),
+    "pitch": ("PLANE PITCH DEGREES", "Degrees", lambda v: round(float(v), 2)),
+    "bank": ("PLANE BANK DEGREES", "Degrees", lambda v: round(float(v), 2)),
+    "heading": (
+        "PLANE HEADING DEGREES MAGNETIC",
+        "Degrees",
+        lambda v: round(float(v), 1),
+    ),
     # --- Flight director ---
-    "fd_pitch":         ("AUTOPILOT FLIGHT DIRECTOR PITCH","Degrees",        lambda v: round(float(v), 2)),
-    "fd_bank":          ("AUTOPILOT FLIGHT DIRECTOR BANK", "Degrees",        lambda v: round(float(v), 2)),
+    "fd_pitch": (
+        "AUTOPILOT FLIGHT DIRECTOR PITCH",
+        "Degrees",
+        lambda v: round(float(v), 2),
+    ),
+    "fd_bank": (
+        "AUTOPILOT FLIGHT DIRECTOR BANK",
+        "Degrees",
+        lambda v: round(float(v), 2),
+    ),
     # --- Autopilot modes ---
-    "autopilot_active": ("AUTOPILOT MASTER",              "Bool",            _b),
-    "at_active":        ("AUTOPILOT THROTTLE ARM",        "Bool",            _b),
-    "lnav_active":      ("AUTOPILOT NAV1 LOCK",           "Bool",            _b),
-    "vnav_active":      ("AUTOPILOT ALTITUDE LOCK",       "Bool",            _b),
-    "app_active":       ("AUTOPILOT APPROACH HOLD",       "Bool",            _b),
-    "loc_active":       ("AUTOPILOT NAV1 LOCK",           "Bool",            _b),
+    "autopilot_active": ("AUTOPILOT MASTER", "Bool", _b),
+    "at_active": ("AUTOPILOT THROTTLE ARM", "Bool", _b),
+    "lnav_active": ("AUTOPILOT NAV1 LOCK", "Bool", _b),
+    "vnav_active": ("AUTOPILOT ALTITUDE LOCK", "Bool", _b),
+    "app_active": ("AUTOPILOT APPROACH HOLD", "Bool", _b),
+    "loc_active": ("AUTOPILOT NAV1 LOCK", "Bool", _b),
     # --- Autopilot selected values ---
-    "selected_speed":   ("AUTOPILOT AIRSPEED HOLD VAR",   "Knots",           lambda v: round(float(v), 0)),
-    "selected_altitude":("AUTOPILOT ALTITUDE LOCK VAR",   "Feet",            lambda v: round(float(v), 0)),
-    "selected_heading": ("AUTOPILOT HEADING LOCK DIR",    "Degrees",         lambda v: round(float(v), 1)),
+    "selected_speed": (
+        "AUTOPILOT AIRSPEED HOLD VAR",
+        "Knots",
+        lambda v: round(float(v), 0),
+    ),
+    "selected_altitude": (
+        "AUTOPILOT ALTITUDE LOCK VAR",
+        "Feet",
+        lambda v: round(float(v), 0),
+    ),
+    "selected_heading": (
+        "AUTOPILOT HEADING LOCK DIR",
+        "Degrees",
+        lambda v: round(float(v), 1),
+    ),
     # --- Flaps (shared with annunciator panel) ---
-    "flaps":            ("FLAPS HANDLE INDEX",            "Number",          lambda v: int(v)),
+    "flaps": ("FLAPS HANDLE INDEX", "Number", lambda v: int(v)),
 }
 
 # Build deduplicated subscription spec (some keys share vars, or have a list of vars)
@@ -156,6 +184,7 @@ _gauge_keys = {k for k, v in SIMVARS.items() if v.get("type") == "gauge"}
 _sim_state: dict = {k: (0 if k in _gauge_keys else False) for k in SIMVARS}
 _state_lock = threading.Lock()
 _connected_clients: set = set()
+SC_POLL_INTERVAL_S = 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +197,7 @@ def _poll_simconnect(
 ) -> None:
     from simconnect import SimConnect
     from simconnect.datadef import DataDefinition
-    from simconnect.scdefs import PERIOD_SECOND
+    from simconnect.scdefs import PERIOD_SIM_FRAME
 
     while not stop_event.is_set():
         try:
@@ -177,11 +206,12 @@ def _poll_simconnect(
             DataDefinition._instances.clear()
 
             with SimConnect(dll_path=dll_path) as sc:
-                dd = sc.subscribe_simdata(_SC_SPEC, period=PERIOD_SECOND)
+                # Request data every sim frame; WS broadcast loop throttles outbound rate.
+                dd = sc.subscribe_simdata(_SC_SPEC, period=PERIOD_SIM_FRAME)
                 print("[SC] Connected. Polling…")
 
                 while not stop_event.is_set():
-                    sc.receive(timeout_seconds=0.25)
+                    sc.receive(timeout_seconds=SC_POLL_INTERVAL_S)
 
                     if not dd.simdata:
                         continue
@@ -234,7 +264,7 @@ async def _ws_handler(websocket) -> None:
 
 async def _broadcast_loop() -> None:
     while True:
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.1)
         if not _connected_clients:
             continue
         with _state_lock:
