@@ -67,7 +67,7 @@ async def handler(websocket):
 
 async def broadcast_loop():
     while True:
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.1)
         _pfd_animate()
         if not connected_clients:
             continue
