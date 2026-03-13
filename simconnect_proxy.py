@@ -164,6 +164,36 @@ SIMVAR_MAP: dict[str, tuple[str | list[str], str | None, callable]] = {
     ),
     # --- Flaps (shared with annunciator panel) ---
     "flaps": ("FLAPS HANDLE INDEX", "Number", lambda v: int(v)),
+    # -------------------------------------------------------------------------
+    # EICAS / EIS — engine instrument vars
+    # -------------------------------------------------------------------------
+    # GA / piston
+    "rpm":               ("GENERAL ENG RPM:1",            "RPM",              lambda v: round(float(v), 0)),
+    "manifold_pressure": ("ENG MANIFOLD PRESSURE:1",      "inHg",             lambda v: round(float(v), 1)),
+    "fuel_flow":         ("ENG FUEL FLOW GPH:1",          "Gallons per hour", lambda v: round(float(v), 1)),
+    "oil_temp":          ("ENG OIL TEMPERATURE:1",        "Fahrenheit",       lambda v: round(float(v), 0)),
+    "oil_pressure":      ("ENG OIL PRESSURE:1",           "Pounds per square inch", lambda v: round(float(v), 0)),
+    "egt":               ("ENG EXHAUST GAS TEMPERATURE:1","Fahrenheit",       lambda v: round(float(v), 0)),
+    # Jet — engine 1
+    "n1_1":        ("ENG N1 RPM:1",              "Percent",            lambda v: round(float(v), 1)),
+    "n2_1":        ("ENG N2 RPM:1",              "Percent",            lambda v: round(float(v), 1)),
+    "egt_1":       ("ENG EXHAUST GAS TEMPERATURE:1", "Celsius",        lambda v: round(float(v), 0)),
+    "ff_1":        ("ENG FUEL FLOW PPH:1",        "Pounds per hour",   lambda v: round(float(v), 0)),
+    "oil_temp_1":  ("ENG OIL TEMPERATURE:1",      "Celsius",           lambda v: round(float(v), 0)),
+    "oil_press_1": ("ENG OIL PRESSURE:1",         "Pounds per square inch", lambda v: round(float(v), 0)),
+    "vib_1":       ("ENG VIBRATION:1",            "Number",            lambda v: round(float(v), 1)),
+    # Jet — engine 2
+    "n1_2":        ("ENG N1 RPM:2",              "Percent",            lambda v: round(float(v), 1)),
+    "n2_2":        ("ENG N2 RPM:2",              "Percent",            lambda v: round(float(v), 1)),
+    "egt_2":       ("ENG EXHAUST GAS TEMPERATURE:2", "Celsius",        lambda v: round(float(v), 0)),
+    "ff_2":        ("ENG FUEL FLOW PPH:2",        "Pounds per hour",   lambda v: round(float(v), 0)),
+    "oil_temp_2":  ("ENG OIL TEMPERATURE:2",      "Celsius",           lambda v: round(float(v), 0)),
+    "oil_press_2": ("ENG OIL PRESSURE:2",         "Pounds per square inch", lambda v: round(float(v), 0)),
+    "vib_2":       ("ENG VIBRATION:2",            "Number",            lambda v: round(float(v), 1)),
+    # Fuel (weight in kg — adjust to Pounds/Gallons if your aircraft differs)
+    "fuel_left":   ("FUEL TANK LEFT MAIN QUANTITY",  "Kilograms", lambda v: round(float(v), 0)),
+    "fuel_right":  ("FUEL TANK RIGHT MAIN QUANTITY", "Kilograms", lambda v: round(float(v), 0)),
+    "fuel_total":  ("FUEL TOTAL QUANTITY WEIGHT",    "Kilograms", lambda v: round(float(v), 0)),
 }
 
 # Build deduplicated subscription spec (some keys share vars, or have a list of vars)
@@ -182,6 +212,19 @@ for _our_key, (_sc_var, _units, _) in SIMVAR_MAP.items():
 
 _gauge_keys = {k for k, v in SIMVARS.items() if v.get("type") == "gauge"}
 _sim_state: dict = {k: (0 if k in _gauge_keys else False) for k in SIMVARS}
+
+# EICAS defaults — held until SimConnect provides real values
+_sim_state.update({
+    "rpm": 0.0, "manifold_pressure": 0.0, "fuel_flow": 0.0,
+    "oil_temp": 0.0, "oil_pressure": 0.0, "egt": 0.0,
+    "n1_1": 0.0, "n1_2": 0.0, "n2_1": 0.0, "n2_2": 0.0,
+    "egt_1": 0.0, "egt_2": 0.0, "ff_1": 0.0, "ff_2": 0.0,
+    "oil_temp_1": 0.0, "oil_temp_2": 0.0,
+    "oil_press_1": 0.0, "oil_press_2": 0.0,
+    "vib_1": 0.0, "vib_2": 0.0,
+    "fuel_left": 0.0, "fuel_right": 0.0, "fuel_total": 0.0,
+})
+
 _state_lock = threading.Lock()
 _connected_clients: set = set()
 SC_POLL_INTERVAL_S = 0.1

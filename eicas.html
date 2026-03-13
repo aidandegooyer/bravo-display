@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=480, initial-scale=1.0">
+<title>EICAS</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+  canvas { display: block; }
+  #status { position: fixed; top: 4px; right: 4px; color: #ff0; font: 10px monospace; opacity: 0.7; }
+</style>
+</head>
+<body>
+<canvas id="eicas" width="480" height="640"></canvas>
+<div id="status">NO WS</div>
+<script>
+"use strict";
+
+// ─── Config ───────────────────────────────────────────────────────────────────
+const SIM_IP = "10.0.0.158";
+const WS_URL = `ws://${SIM_IP}:8765`;
+const SIMULATE = false;
+
+// ─── Colors ───────────────────────────────────────────────────────────────────
+const C = {
+  WHITE:   "#FFFFFF",
+  GREEN:   "#00FF00",
+  AMBER:   "#FFAA00",
+  RED:     "#FF2222",
+  CYAN:    "#00FFFF",
+  DARK:    "#1A1A1A",
+  PANEL:   "#111111",
+  BORDER:  "#444444",
+  LABEL:   "#FFFFFF",   // all labels white
+  DIM:     "#333333",
+  // Airbus palette
+  AB_GREEN:  "#00DD00",
+  AB_AMBER:  "#FF9900",
+  AB_BLUE:   "#00AAFF",
+  AB_WHITE:  "#DDDDDD",
+  // GA palette
+  GA_GREEN:  "#00CC44",
+  GA_YELLOW: "#DDCC00",
+  GA_RED:    "#EE2222",
+};
+
+const W = 480, H = 640;
+const TAB_H = 50;
+const FONT = '"Consolas","Courier New",monospace';
+
+// ─── Layout indices ───────────────────────────────────────────────────────────
+// 0 = GA, 1 = Boeing EICAS, 2 = Airbus ECAM
+let layoutIdx = 0;
+const LAYOUT_NAMES = ["GA / EIS", "BOEING", "AIRBUS"];
+
+// ─── Defaults ─────────────────────────────────────────────────────────────────
+const _DEFAULTS = {
+  // GA / piston
+  rpm:              2300,
+  manifold_pressure: 24.5,
+  fuel_flow:        11.2,
+  oil_temp:         195,
+  oil_pressure:     72,
+  egt:              1320,
+  // Turbine / jet (both engines)
+  n1_1:  84.2,  n1_2:  84.0,
+  n2_1:  92.1,  n2_2:  92.0,
+  egt_1: 620,   egt_2: 615,
+  ff_1:  2640,  ff_2:  2620,
+  oil_temp_1:  85,  oil_temp_2:  83,
+  oil_press_1: 62,  oil_press_2: 61,
+  vib_1:  0.8,  vib_2:  0.7,
+  // Shared
+  fuel_left:  8400,
+  fuel_right: 8350,
+  fuel_total: 16750,
+};
+
+const SMOOTH_KEYS = [
+  "rpm","manifold_pressure","fuel_flow","oil_temp","oil_pressure","egt",
+  "n1_1","n1_2","n2_1","n2_2","egt_1","egt_2","ff_1","ff_2",
+  "oil_temp_1","oil_temp_2","oil_press_1","oil_press_2","vib_1","vib_2",
+  "fuel_left","fuel_right","fuel_total",
+];
+
+let snapPrev     = Object.assign({}, _DEFAULTS);
+let snapCurr     = Object.assign({}, _DEFAULTS);
+let snapTime     = performance.now();
+let snapInterval = 500;
+let simData      = Object.assign({}, _DEFAULTS);
+
+function interpStep(ts) {
+  const alpha = Math.min(1, (ts - snapTime) / snapInterval);
+  for (const key of SMOOTH_KEYS) {
+    const a = snapPrev[key], b = snapCurr[key];
+    if (typeof a !== "number" || typeof b !== "number") continue;
+    simData[key] = a + (b - a) * alpha;
+  }
+}
+
+let wsConnected = false;
+let flash = false;
+let lastFlash = 0;
+
+// ─── WebSocket ────────────────────────────────────────────────────────────────
+function connectWS() {
+  if (SIMULATE) return;
+  const ws = new WebSocket(WS_URL);
+  ws.onopen  = () => { wsConnected = true;  document.getElementById("status").textContent = "WS OK"; };
+  ws.onclose = () => { wsConnected = false; document.getElementById("status").textContent = "NO WS"; setTimeout(connectWS, 3000); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      const now = performance.now();
+      snapInterval = now - snapTime;
+      snapPrev = Object.assign({}, simData);
+      Object.assign(snapCurr, d);
+      snapTime = now;
+    } catch {}
+  };
+}
+connectWS();
+
+// ─── Simulation (fallback animation) ─────────────────────────────────────────
+let simTime = 0;
+function updateSimulation(dt) {
+  simTime += dt;
+  const t = simTime;
+  if (!SIMULATE && wsConnected) return;
+  simData.rpm               = 2300 + 30  * Math.sin(t * 0.3);
+  simData.manifold_pressure = 24.5 + 0.3 * Math.sin(t * 0.2);
+  simData.fuel_flow         = 11.2 + 0.2 * Math.sin(t * 0.4);
+  simData.oil_temp          = 195  + 2   * Math.sin(t * 0.1);
+  simData.oil_pressure      = 72   + 1   * Math.sin(t * 0.15);
+  simData.egt               = 1320 + 20  * Math.sin(t * 0.25);
+  simData.n1_1  = 84.2 + 0.4 * Math.sin(t * 0.30);
+  simData.n1_2  = 84.0 + 0.4 * Math.sin(t * 0.28);
+  simData.n2_1  = 92.1 + 0.3 * Math.sin(t * 0.22);
+  simData.n2_2  = 92.0 + 0.3 * Math.sin(t * 0.24);
+  simData.egt_1 = 620  + 8   * Math.sin(t * 0.18);
+  simData.egt_2 = 615  + 8   * Math.sin(t * 0.20);
+  simData.ff_1  = 2640 + 30  * Math.sin(t * 0.35);
+  simData.ff_2  = 2620 + 30  * Math.sin(t * 0.33);
+  simData.oil_temp_1 = 85 + Math.sin(t * 0.12);
+  simData.oil_temp_2 = 83 + Math.sin(t * 0.11);
+}
+
+// ─── Touch / swipe ────────────────────────────────────────────────────────────
+let touchStartX = 0;
+document.addEventListener("touchstart", e => { touchStartX = e.touches[0].clientX; }, { passive: true });
+document.addEventListener("touchend", e => {
+  const dx = e.changedTouches[0].clientX - touchStartX;
+  if (Math.abs(dx) > 40) layoutIdx = (layoutIdx + (dx < 0 ? 1 : -1) + 3) % 3;
+}, { passive: true });
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+function label(ctx, txt, x, y, size, color, align, baseline) {
+  ctx.fillStyle    = color    || C.WHITE;
+  ctx.font         = `${size}px ${FONT}`;
+  ctx.textAlign    = align    || "center";
+  ctx.textBaseline = baseline || "middle";
+  ctx.fillText(txt, x, y);
+}
+
+function hline(ctx, x1, x2, y, color, lw) {
+  ctx.strokeStyle = color || C.BORDER;
+  ctx.lineWidth   = lw    || 1;
+  ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
+}
+
+function vline(ctx, x, y1, y2, color, lw) {
+  ctx.strokeStyle = color || C.BORDER;
+  ctx.lineWidth   = lw    || 1;
+  ctx.beginPath(); ctx.moveTo(x, y1); ctx.lineTo(x, y2); ctx.stroke();
+}
+
+// Arc gauge: cx,cy=center, r=radius, startDeg/endDeg=sweep
+// zones: [{lo,hi,color}], value/min/max, pointerColor, lbl, valFmt, unit
+function drawArcGauge(ctx, cx, cy, r, startDeg, endDeg, value, min, max, zones, pointerColor, lbl, valFmt, unit) {
+  const toRad = d => d * Math.PI / 180;
+  const frac  = clamp((value - min) / (max - min), 0, 1);
+  const sweep = endDeg - startDeg;
+
+  // Track background
+  ctx.strokeStyle = C.DIM;
+  ctx.lineWidth   = 8;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, toRad(startDeg), toRad(endDeg));
+  ctx.stroke();
+
+  // Colored zone arcs
+  for (const z of zones) {
+    const zf0 = clamp((z.lo - min) / (max - min), 0, 1);
+    const zf1 = clamp((z.hi - min) / (max - min), 0, 1);
+    ctx.strokeStyle = z.color;
+    ctx.lineWidth   = 6;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, toRad(startDeg + sweep * zf0), toRad(startDeg + sweep * zf1));
+    ctx.stroke();
+  }
+
+  // Pointer needle
+  const needleAngle = toRad(startDeg + sweep * frac);
+  const nx = cx + Math.cos(needleAngle) * (r - 2);
+  const ny = cy + Math.sin(needleAngle) * (r - 2);
+  ctx.strokeStyle = pointerColor || C.WHITE;
+  ctx.lineWidth   = 2.5;
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(nx, ny); ctx.stroke();
+  ctx.fillStyle = C.WHITE;
+  ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.fill();
+
+  // Value text (size 16, was 13 × 1.25)
+  const valStr = valFmt ? valFmt(value) : Math.round(value).toString();
+  label(ctx, valStr, cx, cy + r * 0.35, 16, pointerColor || C.WHITE);
+
+  // Unit (size 11, was 9 × 1.25)
+  if (unit) label(ctx, unit, cx, cy + r * 0.55, 11, C.LABEL);
+
+  // Label above gauge (size 14, was 11 × 1.25)
+  if (lbl) label(ctx, lbl, cx, cy - r - 10, 14, C.LABEL);
+}
+
+// Vertical tape bar (Boeing EICAS style)
+function drawVerticalTape(ctx, x, y, w, h, value, min, max, zones, lbl, valStr, valColor) {
+  ctx.fillStyle = "#0A0A0A";
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = C.BORDER;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x, y, w, h);
+
+  const frac = clamp((value - min) / (max - min), 0, 1);
+
+  for (const z of zones) {
+    const zf0 = clamp((z.lo - min) / (max - min), 0, 1);
+    const zf1 = clamp((z.hi - min) / (max - min), 0, 1);
+    const zy0 = y + h - zf1 * h;
+    const zy1 = y + h - zf0 * h;
+    ctx.fillStyle = z.color + "44";
+    ctx.fillRect(x + 1, zy0, 4, zy1 - zy0);
+    ctx.fillStyle = z.color;
+    ctx.fillRect(x + 1, zy0, 3, zy1 - zy0);
+  }
+
+  const barH = frac * (h - 2);
+  ctx.fillStyle = valColor || C.GREEN;
+  ctx.fillRect(x + 8, y + h - 1 - barH, w - 16, barH);
+
+  const py = y + h - frac * h;
+  ctx.strokeStyle = C.WHITE;
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x, py); ctx.lineTo(x + w, py); ctx.stroke();
+
+  // Label top (size 13, was 10 × 1.25)
+  if (lbl) label(ctx, lbl, x + w/2, y - 10, 13, C.LABEL);
+
+  // Value below (size 15, was 12 × 1.25)
+  label(ctx, valStr, x + w/2, y + h + 11, 15, valColor || C.WHITE);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LAYOUT 0: GA / EIS
+// ─────────────────────────────────────────────────────────────────────────────
+function drawGA(ctx, d) {
+  const HDR = 28;
+  ctx.fillStyle = "#0A1A0A";
+  ctx.fillRect(0, 0, W, HDR);
+  hline(ctx, 0, W, HDR, C.BORDER);
+  label(ctx, "ENGINE", W/2, HDR/2, 15, C.GA_GREEN);  // 12 × 1.25
+
+  const gauges = [
+    {
+      key: "rpm", lbl: "RPM", min: 0, max: 2800,
+      zones: [
+        { lo: 0,    hi: 2200, color: C.GA_GREEN  },
+        { lo: 2200, hi: 2500, color: C.GA_YELLOW },
+        { lo: 2500, hi: 2800, color: C.GA_RED    },
+      ],
+      valFmt: v => Math.round(v).toString(), unit: "RPM",
+    },
+    {
+      key: "manifold_pressure", lbl: "MAN IN", min: 10, max: 35,
+      zones: [
+        { lo: 10, hi: 29,  color: C.GA_GREEN  },
+        { lo: 29, hi: 32,  color: C.GA_YELLOW },
+        { lo: 32, hi: 35,  color: C.GA_RED    },
+      ],
+      valFmt: v => v.toFixed(1), unit: "IN HG",
+    },
+    {
+      key: "fuel_flow", lbl: "FUEL FLOW", min: 0, max: 20,
+      zones: [
+        { lo: 0,  hi: 4,  color: C.GA_YELLOW },
+        { lo: 4,  hi: 16, color: C.GA_GREEN  },
+        { lo: 16, hi: 20, color: C.GA_RED    },
+      ],
+      valFmt: v => v.toFixed(1), unit: "GPH",
+    },
+    {
+      key: "oil_temp", lbl: "OIL TEMP", min: 75, max: 245,
+      zones: [
+        { lo: 75,  hi: 100, color: C.GA_YELLOW },
+        { lo: 100, hi: 210, color: C.GA_GREEN  },
+        { lo: 210, hi: 245, color: C.GA_RED    },
+      ],
+      valFmt: v => Math.round(v).toString(), unit: "°F",
+    },
+    {
+      key: "oil_pressure", lbl: "OIL PSI", min: 0, max: 115,
+      zones: [
+        { lo: 0,   hi: 25,  color: C.GA_RED    },
+        { lo: 25,  hi: 35,  color: C.GA_YELLOW },
+        { lo: 35,  hi: 90,  color: C.GA_GREEN  },
+        { lo: 90,  hi: 115, color: C.GA_RED    },
+      ],
+      valFmt: v => Math.round(v).toString(), unit: "PSI",
+    },
+    {
+      key: "egt", lbl: "EGT", min: 900, max: 1650,
+      zones: [
+        { lo: 900,  hi: 1400, color: C.GA_GREEN  },
+        { lo: 1400, hi: 1550, color: C.GA_YELLOW },
+        { lo: 1550, hi: 1650, color: C.GA_RED    },
+      ],
+      valFmt: v => Math.round(v).toString(), unit: "°F",
+    },
+  ];
+
+  const cols = 3, rows = 2;
+  const cellW = W / cols;
+  const cellH = (H - HDR - TAB_H) / rows;
+
+  gauges.forEach((g, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const cx  = col * cellW + cellW / 2;
+    const cy  = HDR + row * cellH + cellH * 0.46;
+    const r   = Math.min(cellW, cellH) * 0.36;
+
+    ctx.fillStyle = row === 0 ? "#060C06" : "#06060C";
+    ctx.fillRect(col * cellW, HDR + row * cellH, cellW, cellH);
+    ctx.strokeStyle = "#222";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(col * cellW, HDR + row * cellH, cellW, cellH);
+
+    const pColor = _gaPointerColor(d[g.key], g.zones);
+    drawArcGauge(ctx, cx, cy, r, 150, 390, d[g.key] ?? 0, g.min, g.max,
+      g.zones, pColor, g.lbl, g.valFmt, g.unit);
+  });
+}
+
+function _gaPointerColor(value, zones) {
+  for (let i = zones.length - 1; i >= 0; i--) {
+    const z = zones[i];
+    if (value >= z.lo && value <= z.hi) return z.color;
+  }
+  return C.WHITE;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LAYOUT 1: Boeing EICAS
+// ─────────────────────────────────────────────────────────────────────────────
+function drawBoeing(ctx, d) {
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, W, H);
+
+  // Header
+  label(ctx, "ENGINE", W/2, 14, 14, C.WHITE);   // 11 × 1.25 → 14
+  hline(ctx, 0, W, 26, C.BORDER);
+  label(ctx, "ENG 1", W/4,     20, 14, C.WHITE); // 11 → 14
+  label(ctx, "ENG 2", W * 3/4, 20, 14, C.WHITE);
+  vline(ctx, W/2, 0, H - TAB_H, C.BORDER);
+
+  // ── Primary: N1 arc gauges ────────────────────────────────────────────────
+  const n1R = 60;
+  const n1Y = 28 + 20 + n1R;  // = 108
+  const n1Zones = [
+    { lo: 0,  hi: 93,  color: C.GREEN },
+    { lo: 93, hi: 100, color: C.RED   },
+  ];
+
+  const n1_1Color = d.n1_1 > 93 ? C.RED : C.GREEN;
+  drawArcGauge(ctx, W/4,   n1Y, n1R, 150, 390, d.n1_1, 0, 100, n1Zones, n1_1Color,
+    null, v => v.toFixed(1), null);
+  label(ctx, "N1", W/4,   n1Y - n1R - 10, 16, C.WHITE); // 13 → 16
+  label(ctx, "%",  W/4,   n1Y + n1R * 0.70, 13, C.LABEL); // 10 → 13
+
+  const n1_2Color = d.n1_2 > 93 ? C.RED : C.GREEN;
+  drawArcGauge(ctx, W*3/4, n1Y, n1R, 150, 390, d.n1_2, 0, 100, n1Zones, n1_2Color,
+    null, v => v.toFixed(1), null);
+  label(ctx, "N1", W*3/4, n1Y - n1R - 10, 16, C.WHITE);
+
+  // ── Secondary: N2 + EGT vertical tapes ───────────────────────────────────
+  const tapeTop = n1Y + n1R + 22;  // ~190
+  const tapeH   = 70;
+  const tapeW   = 38;
+  const colL    = W/4  - tapeW * 1.4;
+  const colR    = W*3/4 - tapeW * 1.4;
+
+  const n2Zones  = [{ lo: 0, hi: 95, color: C.GREEN }, { lo: 95, hi: 100, color: C.RED }];
+  const egtZones = [
+    { lo: 0,   hi: 880,  color: C.GREEN },
+    { lo: 880, hi: 950,  color: C.AMBER },
+    { lo: 950, hi: 1000, color: C.RED   },
+  ];
+
+  drawVerticalTape(ctx, colL,           tapeTop, tapeW, tapeH, d.n2_1, 0, 100, n2Zones,
+    "N2", d.n2_1.toFixed(1), d.n2_1 > 95 ? C.RED : C.GREEN);
+  drawVerticalTape(ctx, colR,           tapeTop, tapeW, tapeH, d.n2_2, 0, 100, n2Zones,
+    "N2", d.n2_2.toFixed(1), d.n2_2 > 95 ? C.RED : C.GREEN);
+  drawVerticalTape(ctx, colL + tapeW + 8, tapeTop, tapeW, tapeH, d.egt_1, 0, 1000, egtZones,
+    "EGT", Math.round(d.egt_1).toString(), d.egt_1 > 950 ? C.RED : d.egt_1 > 880 ? C.AMBER : C.GREEN);
+  drawVerticalTape(ctx, colR + tapeW + 8, tapeTop, tapeW, tapeH, d.egt_2, 0, 1000, egtZones,
+    "EGT", Math.round(d.egt_2).toString(), d.egt_2 > 950 ? C.RED : d.egt_2 > 880 ? C.AMBER : C.GREEN);
+
+  // ── Tertiary data rows ────────────────────────────────────────────────────
+  const row3Y = tapeTop + tapeH + 30;  // ~310
+  hline(ctx, 0, W, row3Y - 6, C.BORDER);
+
+  // 4 rows, 44px each
+  _boeingDataCell(ctx, row3Y,       "OIL °C",
+    Math.round(d.oil_temp_1) + "°", d.oil_temp_1 > 155 ? C.AMBER : C.WHITE,
+    Math.round(d.oil_temp_2) + "°", d.oil_temp_2 > 155 ? C.AMBER : C.WHITE);
+  _boeingDataCell(ctx, row3Y + 44,  "OIL PSI",
+    Math.round(d.oil_press_1).toString(), d.oil_press_1 < 13 ? C.AMBER : C.WHITE,
+    Math.round(d.oil_press_2).toString(), d.oil_press_2 < 13 ? C.AMBER : C.WHITE);
+  _boeingDataCell(ctx, row3Y + 88,  "FF  PPH",
+    Math.round(d.ff_1).toString(), C.WHITE,
+    Math.round(d.ff_2).toString(), C.WHITE);
+  _boeingDataCell(ctx, row3Y + 132, "VIB",
+    d.vib_1.toFixed(1), d.vib_1 > 2 ? C.AMBER : C.WHITE,
+    d.vib_2.toFixed(1), d.vib_2 > 2 ? C.AMBER : C.WHITE);
+
+  // ── Fuel totals ────────────────────────────────────────────────────────────
+  const fuelY = H - TAB_H - 62;
+  hline(ctx, 0, W, fuelY - 4, C.BORDER);
+  label(ctx, "FUEL",                              W/2,   fuelY + 10, 13, C.LABEL);  // 10 → 13
+  label(ctx, "L  " + Math.round(d.fuel_left),     W/4,   fuelY + 30, 16, C.WHITE);  // 13 → 16
+  label(ctx, Math.round(d.fuel_total) + " KG",    W/2,   fuelY + 48, 19, C.GREEN);  // 15 → 19
+  label(ctx, "R  " + Math.round(d.fuel_right),    W*3/4, fuelY + 30, 16, C.WHITE);
+}
+
+function _boeingDataCell(ctx, y, lbl, val1, c1, val2, c2) {
+  label(ctx, lbl,  W/2,   y + 18, 13, C.LABEL);   // 10 → 13
+  label(ctx, val1, W/4,   y + 18, 18, c1);          // 14 → 18
+  label(ctx, val2, W*3/4, y + 18, 18, c2);
+  hline(ctx, 20, W - 20, y + 38, "#222");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LAYOUT 2: Airbus ECAM
+// ─────────────────────────────────────────────────────────────────────────────
+function drawAirbus(ctx, d) {
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, W, H);
+
+  // Header
+  const HDR = 28;
+  ctx.fillStyle = "#0A0A0A";
+  ctx.fillRect(0, 0, W, HDR);
+  hline(ctx, 0, W, HDR, "#333");
+  label(ctx, "ENG", W/2,   HDR/2, 14, C.AB_WHITE);  // 11 → 14
+  label(ctx, "1",   W/4,   HDR/2, 16, C.AB_WHITE);  // 13 → 16
+  label(ctx, "2",   W*3/4, HDR/2, 16, C.AB_WHITE);
+  vline(ctx, W/2, HDR, H - TAB_H, "#333");
+
+  // Rows: N1, EGT, FF, OIL
+  const rows = [
+    { lbl: "N1   %",    key1: "n1_1",        key2: "n1_2",        min: 0,  max: 100,  warnHi: 93,   fmt: v => v.toFixed(1) },
+    { lbl: "EGT  °C",   key1: "egt_1",       key2: "egt_2",       min: 0,  max: 950,  warnHi: 880,  fmt: v => Math.round(v).toString() },
+    { lbl: "FF  KG/H",  key1: "ff_1",        key2: "ff_2",        min: 0,  max: 4000, warnHi: 3800, fmt: v => Math.round(v).toString() },
+    { lbl: "OIL  PSI",  key1: "oil_press_1", key2: "oil_press_2", min: 0,  max: 120,  warnLo: 13, warnHi: 105, fmt: v => Math.round(v).toString() },
+  ];
+
+  // Reserve space for fuel row at bottom
+  const fuelH = 52;
+  const fuelY = H - TAB_H - fuelH;
+  const rowH  = (fuelY - HDR) / rows.length;
+  const gaugeR = Math.min(46, rowH * 0.40);
+  const startDeg = 145, endDeg = 395;
+
+  rows.forEach((row, ri) => {
+    const cy = HDR + ri * rowH + rowH * 0.48;
+    const v1 = d[row.key1] ?? 0;
+    const v2 = d[row.key2] ?? 0;
+
+    if (ri > 0) hline(ctx, 0, W, HDR + ri * rowH, "#1A1A1A");
+
+    // Row label center (size 13, was 10 → 13; color white)
+    label(ctx, row.lbl, W/2, cy, 13, C.WHITE);
+
+    const zones = _airbusZones(row);
+    drawArcGauge(ctx, W/4,   cy, gaugeR, startDeg, endDeg, v1, row.min, row.max, zones,
+      _airbusColor(v1, row), null, row.fmt, null);
+    drawArcGauge(ctx, W*3/4, cy, gaugeR, startDeg, endDeg, v2, row.min, row.max, zones,
+      _airbusColor(v2, row), null, row.fmt, null);
+  });
+
+  // Fuel row
+  hline(ctx, 0, W, fuelY - 2, "#333");
+  label(ctx, "FOB",                              W/2,   fuelY + 10, 13, C.WHITE);      // 10 → 13
+  label(ctx, Math.round(d.fuel_left).toString(),  W/4,   fuelY + 30, 18, C.AB_BLUE);   // 14 → 18
+  label(ctx, Math.round(d.fuel_total).toString(), W/2,   fuelY + 40, 20, C.AB_GREEN);  // 16 → 20
+  label(ctx, Math.round(d.fuel_right).toString(), W*3/4, fuelY + 30, 18, C.AB_BLUE);
+  label(ctx, "L KG",     W/4,   fuelY + 14, 11, C.WHITE);  // 9 → 11
+  label(ctx, "TOTAL KG", W/2,   fuelY + 14, 11, C.WHITE);
+  label(ctx, "R KG",     W*3/4, fuelY + 14, 11, C.WHITE);
+}
+
+function _airbusZones(row) {
+  const zones = [{ lo: row.min, hi: row.max, color: C.AB_GREEN }];
+  if (row.warnLo != null) zones.push({ lo: row.min,    hi: row.warnLo, color: C.AB_AMBER });
+  if (row.warnHi != null) zones.push({ lo: row.warnHi, hi: row.max,    color: C.AB_AMBER });
+  if (row.redHi  != null) zones.push({ lo: row.redHi,  hi: row.max,    color: C.RED      });
+  return zones;
+}
+
+function _airbusColor(v, row) {
+  if (row.warnLo != null && v < row.warnLo) return C.AB_AMBER;
+  if (row.warnHi != null && v > row.warnHi) return C.AB_AMBER;
+  return C.AB_GREEN;
+}
+
+// ─── Tab bar ──────────────────────────────────────────────────────────────────
+function drawTabBar(ctx) {
+  const y = H - TAB_H;
+  ctx.fillStyle = "#0A0A0A";
+  ctx.fillRect(0, y, W, TAB_H);
+  hline(ctx, 0, W, y, C.BORDER);
+
+  const tabW = W / 3;
+  LAYOUT_NAMES.forEach((name, i) => {
+    const tx = i * tabW;
+    const active = i === layoutIdx;
+    if (active) {
+      ctx.fillStyle = "#1A2A1A";
+      ctx.fillRect(tx + 1, y + 1, tabW - 2, TAB_H - 2);
+    }
+    if (i > 0) vline(ctx, tx, y, H, C.BORDER);
+    label(ctx, name, tx + tabW/2, y + TAB_H/2, 15, active ? C.GREEN : "#777"); // 12 → 15
+  });
+}
+
+// Tab bar tap handling
+const canvas = document.getElementById("eicas");
+canvas.addEventListener("click", e => {
+  const rect  = canvas.getBoundingClientRect();
+  const scaleX = canvas.width  / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const cy = (e.clientY - rect.top)  * scaleY;
+  if (cy < H - TAB_H) return;
+  const cx = (e.clientX - rect.left) * scaleX;
+  layoutIdx = Math.floor(cx / (W / 3));
+});
+
+// ─── Main render loop ─────────────────────────────────────────────────────────
+const ctx = canvas.getContext("2d");
+let lastTime = null;
+
+function render(ts) {
+  if (lastTime === null) lastTime = ts;
+  const dt = (ts - lastTime) / 1000;
+  lastTime = ts;
+
+  if (ts - lastFlash > 500) { flash = !flash; lastFlash = ts; }
+
+  updateSimulation(dt);
+  if (!SIMULATE) interpStep(ts);
+
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, W, H);
+
+  if      (layoutIdx === 0) drawGA(ctx, simData);
+  else if (layoutIdx === 1) drawBoeing(ctx, simData);
+  else                       drawAirbus(ctx, simData);
+
+  drawTabBar(ctx);
+
+  // Outer bezel
+  ctx.strokeStyle = "#555";
+  ctx.lineWidth = 3;
+  ctx.strokeRect(1, 1, W - 2, H - 2);
+
+  requestAnimationFrame(render);
+}
+
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
