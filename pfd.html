@@ -21,7 +21,7 @@
 //const SIM_IP   = window.location.hostname || "localhost";
 const SIM_IP = "10.0.0.158";
 const WS_URL   = `ws://${SIM_IP}:8765`;
-const SIMULATE = false;
+const SIMULATE = true;
 
 // ─── Colors ───────────────────────────────────────────────────────────────────
 const C = {
@@ -45,9 +45,9 @@ const C = {
 // ─── Layout constants ─────────────────────────────────────────────────────────
 const W = 480, H = 800;
 
-const STATUS_Y  = 0,   STATUS_H  = 30;
-const INST_Y    = 30,  INST_H    = 590;  // Y:30 → 620
-const HDG_Y     = 620, HDG_H     = 100;  // Y:620 → 720
+const STATUS_Y  = 0,   STATUS_H  = 50;
+const INST_Y    = 50,  INST_H    = 620;  // Y:50 → 670
+const HDG_Y     = 670, HDG_H     = 50;   // Y:670 → 720
 const BOT_Y     = 720, BOT_H     = 80;   // Y:720 → 800
 
 // Instrument band x-ranges
@@ -57,9 +57,10 @@ const ALT_X = 370, ALT_W = 70;
 const VS_X  = 440, VS_W  = 40;
 
 const ATT_CX = ATT_X + ATT_W / 2;  // 240
-const ATT_CY = INST_Y + INST_H / 2; // 325
+const ATT_CY = INST_Y + INST_H / 2; // 360
 
 const FONT  = '"Consolas","Courier New",monospace';
+const TEXT_SCALE = 1.2;
 
 // ─── State ────────────────────────────────────────────────────────────────────
 const _DEFAULTS = {
@@ -177,8 +178,9 @@ function roundRect(ctx, x, y, w, h, r, fill, stroke) {
 }
 
 function label(ctx, txt, x, y, size, color, align, baseline) {
+  const scaledSize = Math.max(1, size * TEXT_SCALE);
   ctx.fillStyle   = color || C.WHITE;
-  ctx.font        = `${size}px ${FONT}`;
+  ctx.font        = `${scaledSize}px ${FONT}`;
   ctx.textAlign   = align    || "center";
   ctx.textBaseline = baseline || "middle";
   ctx.fillText(txt, x, y);
@@ -208,24 +210,40 @@ function drawStatusBar(ctx, data) {
     { txt: "LOC",     active: data.loc_active,         col: C.GREEN   },
   ];
 
+  const annY = STATUS_Y + 2;
+  const annH = 26;
+  const annCy = annY + annH / 2;
   const cellW = W / items.length;
   items.forEach((item, i) => {
     const x = i * cellW + cellW/2;
-    const y = STATUS_Y + STATUS_H/2;
     if (item.active) {
-      roundRect(ctx, i * cellW + 2, STATUS_Y + 2, cellW - 4, STATUS_H - 4, 2, "#002200", null);
-      label(ctx, item.txt, x, y, 11, item.col);
+      roundRect(ctx, i * cellW + 2, annY, cellW - 4, annH, 2, "#002200", null);
+      label(ctx, item.txt, x, annCy, 11, item.col);
     } else {
-      label(ctx, item.txt, x, y, 11, "#444444");
+      label(ctx, item.txt, x, annCy, 11, "#444444");
     }
   });
+
+  // Dedicated MCP windows for selected speed/altitude in the top buffer
+  const winY = STATUS_Y + STATUS_H - 20;
+  const winW = 84;
+  const winH = 16;
+  const spdWinX = 24;
+  const altWinX = W - 24 - winW;
+
+  roundRect(ctx, spdWinX, winY, winW, winH, 2, C.DARK, C.BORDER);
+  label(ctx, Math.round(data.selected_speed).toString(), spdWinX + winW / 2, winY + winH / 2, 11, C.MAGENTA);
+
+  roundRect(ctx, altWinX, winY, winW, winH, 2, C.DARK, C.BORDER);
+  label(ctx, Math.round(data.selected_altitude).toString(), altWinX + winW / 2, winY + winH / 2, 11, C.CYAN);
 }
 
 // ─── 2. Speed Tape ────────────────────────────────────────────────────────────
 function drawSpeedTape(ctx, data) {
-  const x = SPD_X, w = SPD_W;
+  const cx = SPD_X + SPD_W; // keep right edge aligned with attitude indicator border
+  const w = 88;             // thinner visible tape
+  const x = cx - w;
   const y = INST_Y, h = INST_H;
-  const cx = x + w; // right edge (border with AI)
   const cy = y + h/2; // center (current speed reference line)
 
   // Background
@@ -311,8 +329,6 @@ function drawSpeedTape(ctx, data) {
   ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(cx, y); ctx.lineTo(cx, y + h); ctx.stroke();
 
-  // Selected speed at top
-  label(ctx, Math.round(data.selected_speed).toString(), x + w/2, y + 14, 13, C.MAGENTA);
 }
 
 // ─── 3. Attitude Indicator ────────────────────────────────────────────────────
@@ -330,7 +346,7 @@ function drawAttitudeIndicator(ctx, data) {
   // ── Sky / Ground rotation ──
   ctx.save();
   ctx.translate(cx, cy);
-  ctx.rotate(-data.bank * Math.PI / 180);
+  ctx.rotate(data.bank * Math.PI / 180);
 
   const pitchOffsetPx = data.pitch * 8; // px per degree
 
@@ -354,7 +370,7 @@ function drawAttitudeIndicator(ctx, data) {
   ctx.strokeStyle = C.WHITE;
   ctx.fillStyle   = C.WHITE;
   ctx.lineWidth = 1.5;
-  const ladderFont = `10px ${FONT}`;
+  const ladderFont = `${10 * TEXT_SCALE}px ${FONT}`;
   ctx.font = ladderFont;
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
@@ -408,7 +424,7 @@ function drawAttitudeIndicator(ctx, data) {
   });
 
   // Bank pointer (triangle at top of arc, rotated by bank)
-  const bankAngle = (-data.bank - 90) * Math.PI / 180;
+  const bankAngle = (data.bank - 90) * Math.PI / 180;
   const bpx = Math.cos(bankAngle) * (arcR - 2);
   const bpy = Math.sin(bankAngle) * (arcR - 2);
   ctx.save();
@@ -431,7 +447,7 @@ function drawAttitudeIndicator(ctx, data) {
 
   ctx.save();
   ctx.translate(cx, cy);
-  ctx.rotate(-data.bank * Math.PI / 180);
+  ctx.rotate(data.bank * Math.PI / 180);
 
   // FD pitch bar (horizontal)
   ctx.strokeStyle = C.FD;
@@ -477,7 +493,7 @@ function drawAttitudeIndicator(ctx, data) {
   // ── Slip/skid ball ──
   ctx.save();
   ctx.translate(cx, cy);
-  const bankRad = -data.bank * Math.PI / 180;
+  const bankRad = data.bank * Math.PI / 180;
   const ballX = clamp(Math.sin(bankRad) * 20, -25, 25);
   const ballBaseY = -arcR + 20;
   ctx.strokeStyle = C.WHITE;
@@ -566,9 +582,6 @@ function drawAltitudeTape(ctx, data) {
   ctx.strokeRect(x + 1, cy - boxH/2, boxW, boxH);
   label(ctx, Math.round(alt).toString(), x + boxW/2, cy, 14, C.WHITE);
 
-  // Selected altitude top
-  label(ctx, Math.round(data.selected_altitude).toString(), x + w/2, y + 14, 12, C.CYAN);
-
   // Left border
   ctx.strokeStyle = C.BORDER;
   ctx.lineWidth = 1;
@@ -581,6 +594,8 @@ function drawVSIndicator(ctx, data) {
   const y = INST_Y, h = INST_H;
   const cx = x + w/2;
   const cy = y + h/2;
+  const pointerX = x + w - 8;
+  const arrowTipX = x + w - 2;
 
   ctx.fillStyle = C.PANEL;
   ctx.fillRect(x, y, w, h);
@@ -613,16 +628,16 @@ function drawVSIndicator(ctx, data) {
   ctx.strokeStyle = C.WHITE;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(x + w - 6, cy);
-  ctx.lineTo(x + w - 6, pointerY);
+  ctx.moveTo(pointerX, cy);
+  ctx.lineTo(pointerX, pointerY);
   ctx.stroke();
   // Arrow head
   ctx.fillStyle = C.WHITE;
   ctx.beginPath();
   const dir = vs < 0 ? 1 : -1;
-  ctx.moveTo(x + w - 6, pointerY);
-  ctx.lineTo(x + w - 12, pointerY - dir * 6);
-  ctx.lineTo(x + w - 0,  pointerY - dir * 6);
+  ctx.moveTo(pointerX, pointerY);
+  ctx.lineTo(pointerX - 6, pointerY - dir * 6);
+  ctx.lineTo(arrowTipX,    pointerY - dir * 6);
   ctx.closePath();
   ctx.fill();
 
