@@ -17,8 +17,14 @@ Usage:
 import argparse
 import asyncio
 import json
+import logging
+import math
 import signal
 import threading
+
+# Suppress noisy websockets handshake errors (TCP probes / browser keepalives
+# that open a connection but close before completing the HTTP upgrade).
+logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 
 from websockets.asyncio.server import serve
 
@@ -268,6 +274,12 @@ def _poll_simconnect(
                                 for v in sc_vars
                                 if dd.simdata.get(v) is not None
                             ]
+                            # Drop nan/inf — SimConnect returns these for
+                            # variables not supported by the current aircraft.
+                            vals = [
+                                v for v in vals
+                                if not (isinstance(v, float) and not math.isfinite(v))
+                            ]
                         except Exception:
                             vals = []
                         if not vals:
@@ -292,13 +304,22 @@ def _poll_simconnect(
 # ---------------------------------------------------------------------------
 
 
+def _safe_json(state: dict) -> str:
+    """Serialize state, replacing nan/inf with 0 (SimConnect occasionally returns these)."""
+    clean = {
+        k: (0 if isinstance(v, float) and not math.isfinite(v) else v)
+        for k, v in state.items()
+    }
+    return json.dumps(clean)
+
+
 async def _ws_handler(websocket) -> None:
     _connected_clients.add(websocket)
     print(f"[WS] Client connected: {websocket.remote_address}")
     try:
         with _state_lock:
             snapshot = dict(_sim_state)
-        await websocket.send(json.dumps(snapshot))
+        await websocket.send(_safe_json(snapshot))
         await websocket.wait_closed()
     finally:
         _connected_clients.discard(websocket)
@@ -310,12 +331,15 @@ async def _broadcast_loop() -> None:
         await asyncio.sleep(0.1)
         if not _connected_clients:
             continue
-        with _state_lock:
-            msg = json.dumps(_sim_state)
-        await asyncio.gather(
-            *[ws.send(msg) for ws in list(_connected_clients)],
-            return_exceptions=True,
-        )
+        try:
+            with _state_lock:
+                msg = _safe_json(_sim_state)
+            await asyncio.gather(
+                *[ws.send(msg) for ws in list(_connected_clients)],
+                return_exceptions=True,
+            )
+        except Exception as exc:
+            print(f"[WS] Broadcast error: {exc!r}")
 
 
 async def _main(host: str, port: int, dll_path: str, debug: bool = False) -> None:

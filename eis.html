@@ -12,7 +12,7 @@
 </style>
 </head>
 <body>
-<canvas id="eicas" width="480" height="640"></canvas>
+<canvas id="EIS" width="480" height="640"></canvas>
 <div id="status">NO WS</div>
 <script>
 "use strict";
@@ -578,6 +578,14 @@ function render(ts) {
   else                       drawAirbus(ctx, simData);
 
   drawTabBar(ctx);
+
+  // No-data overlay (matches pfd.html)
+  if (!SIMULATE && !wsConnected) {
+    ctx.fillStyle = "rgba(0,0,0,0.7)";
+    ctx.fillRect(0, 0, W, H);
+    label(ctx, "NO DATA", W/2, H/2, 36, C.RED);
+    label(ctx, "Waiting for SimConnect...", W/2, H/2 + 50, 14, C.AMBER);
+  }
 
   // Outer bezel
   ctx.strokeStyle = "#555";

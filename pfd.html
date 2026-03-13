@@ -120,6 +120,7 @@ function interpStep(ts) {
       if (diff < -180) diff += 360;
     }
     simData[key] = a + diff * alpha;
+    if (ANGULAR_KEYS.has(key)) simData[key] = ((simData[key] % 360) + 360) % 360;
   }
   for (const key of PASSTHROUGH_KEYS) {
     simData[key] = snapCurr[key];

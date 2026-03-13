@@ -1,9 +1,14 @@
 import asyncio
 import json
+import logging
 import math
 import random
 import signal
 import time
+
+# Suppress noisy websockets handshake errors (TCP probes / browser keepalives
+# that open a connection but close before completing the HTTP upgrade).
+logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 
 from websockets.asyncio.server import serve
 
